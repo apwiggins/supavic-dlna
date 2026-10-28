@@ -1,0 +1,13 @@
+# SupaVic DLNA
+.venv/
+datos/
+config.json
+__pycache__/
+*.pyc
+
+# build
+build/.venv/
+build/tmp/
+build/version_info.txt
+dist/
+*.spec.bak

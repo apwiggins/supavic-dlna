@@ -1,0 +1,36 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: SupaVic DLNA version
+      description: Shown at the top of the control panel (e.g. 1.0.0)
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How do you run it?
+      options: [Installer, Portable ZIP, From source (Windows), From source (Linux/macOS)]
+    validations:
+      required: true
+  - type: input
+    id: player
+    attributes:
+      label: Player / app
+      placeholder: e.g. WiiM Amp + WiiM Home 3.x, BubbleUPnP on Android
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Relevant lines from Control panel → Log (remove anything private)
+      render: text

@@ -1,0 +1,21 @@
+# systemd service for SupaVic DLNA on Linux (runs as your user).
+#   1. Run ./start.sh once (creates .venv), then stop it with Ctrl+C.
+#   2. Edit User= and the paths below, then:
+#        sudo cp contrib/supavic-dlna.service /etc/systemd/system/
+#        sudo systemctl daemon-reload && sudo systemctl enable --now supavic-dlna
+#   Control panel: http://<this-machine>:8200/
+[Unit]
+Description=SupaVic DLNA music server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/home/youruser/supavic-dlna
+ExecStart=/home/youruser/supavic-dlna/.venv/bin/python launcher.py --sin-bandeja --inicio
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
