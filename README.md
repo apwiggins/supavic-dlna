@@ -96,6 +96,50 @@ Open `http://<this-machine>:8200/` to add your folders. There's a systemd unit i
 [`contrib/supavic-dlna.service`](contrib/supavic-dlna.service). The server runs fine on Linux. macOS is untested,
 and there's no tray icon outside Windows.
 
+### Docker (from source)
+
+Using the Makefile:
+
+``` bash
+make build
+make run
+```
+
+Using command line:
+
+``` bash
+docker build -t supavic-dlna-test .
+docker run --rm --net=host --name supavic supvic-dlna-test
+```
+
+Using docker compose:
+
+`docker compose up`
+
+Example docker-compose.yml:
+
+``` yaml
+services:
+  supavic-dlna:
+    build: .
+    image: supavic-dlna-test
+    container_name: supavic-dlna
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /home/CHANGE_ME/music:/music:ro
+      #- music:/music:ro
+    environment:
+      - TZ=UTC
+
+#volumes:
+#  music:
+#    driver_opts:
+#      type: "nfs"
+#      o: "addr=192.168.1.200,nolock,soft,nfsvers=4"
+#      device: ":/mnt/tank/music"
+```
+
 ## Features
 
 ### Browsing on your player

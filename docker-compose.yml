@@ -1,0 +1,18 @@
+services:
+  supavic-dlna:
+    build: .
+    image: supavic-dlna-test
+    container_name: supavic-dlna-container
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - music:/music:ro
+    environment:
+      - TZ=UTC
+
+volumes:
+  music:
+    driver_opts:
+      type: "nfs"
+      o: "addr=192.168.1.200,nolock,soft,nfsvers=4"
+      device: ":/mnt/tank/music"
