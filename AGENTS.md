@@ -33,7 +33,12 @@ Ahí van `config.json` y `datos/` (log, pid, eventos, historial y, si `cache.dir
 ## Servidor (resumen)
 
 - IDs sin estado: `d<raiz>:<rel>` carpeta, `t<raiz>:<rel>` pista, `<raiz>` = sha1[:8] de la ruta configurada.
-  Vistas: `v:<vista>[@letra]`, `v:ar:`, `v:al:`, `v:ge:[…:ar:]`, `v:de:`, `…:todas`, `v:carpeta:<raiz>:<rel>:todas`.
+  Vistas: `v:<vista>[@letra]`, `v:ar:`, `v:ia:<id>[:al:<aid>]` (artistas de pista), `v:al:`, `v:ge:[…:ar:]`, `v:de:`,
+  `…:todas`, `v:carpeta:<raiz>:<rel>:todas`, `v:carpetas` (contenedor opcional de las carpetas).
+- Álbum = (album, albumartist) o (album, carpeta) sin albumartist; si el mismo par aparece en varias carpetas
+  (sin contar subcarpetas `CD1`/`Disc 2`) se separa por carpeta. IDs iguales que antes si no hay homónimos.
+- `VERSION_LECTOR` (PRAGMA user_version de cache.db): súbelo si cambia lo que se extrae de los tags; la caché de tags
+  se vacía una vez al arrancar (las portadas se conservan).
 - UDN = uuid5(`servidorMusicaDLNA:<host>:<DIR_BASE>`) — prefijo histórico, no cambiarlo (los reproductores verían otro servidor).
 - La carpeta navegada siempre se lee del disco (`listar(fresco=True)`): en Windows la fecha de una carpeta no cambia
   de forma fiable al mover subcarpetas. Conteos/portadas usan caché.

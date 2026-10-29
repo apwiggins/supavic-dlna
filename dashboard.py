@@ -57,7 +57,7 @@ RUTA_EVENTOS = DIR_DATOS / "eventos.jsonl"
 RUTA_HIST = DIR_DATOS / "historial.jsonl"
 RUTA_LOG = DIR_DATOS / "dashboard.log"
 ES_WINDOWS = os.name == "nt"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 log = logging.getLogger("dashboard")
 
 NS_AVT = "urn:schemas-upnp-org:service:AVTransport:1"
@@ -847,7 +847,7 @@ en:{"panel":"Control panel ↗","k.esc":"Played today","k.min":"Listening time t
 "serv.vacio":"The server hasn't transferred any tracks yet.","pet":"req.","otrafuente":"other source","sindatos":"No data yet",
 "tip.dia":"{d}: {m} min · {n} tracks · {mb} MB served","sinconexion":"Dashboard offline","e.completo":"complete","e.cortado":"cut off","e.error":"error"}}[LANG]||{};
 const t=(k,o)=>{let s=TXT[k]??k;if(o)for(const x in o)s=s.split("{"+x+"}").join(o[x]);return s};
-const LOC=navigator.language&&navigator.language.toLowerCase().startsWith(LANG)?navigator.language:(LANG==="es"?"es-MX":"en-US");
+const LOC=(()=>{const d=LANG==="es"?"es-MX":"en-US",l=navigator.language||"";try{if(l.toLowerCase().startsWith(LANG)){new Intl.NumberFormat(l);return l}}catch(e){}return d})();
 const nf=n=>Number(n||0).toLocaleString(LOC);
 document.querySelectorAll("[data-i]").forEach(e=>e.innerHTML=t(e.dataset.i));
 const $=s=>document.querySelector(s);

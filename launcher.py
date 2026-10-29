@@ -255,17 +255,45 @@ def bandeja(srv, app):
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(T("b.salir"), salir),
     ]
-    icon = pystray.Icon("SupaVicDLNA", imagen_icono(), f"{srv.APP} — {app.cfg['servidor']['nombre']}"[:127],
-                        pystray.Menu(*items))
+    actual = {}
 
     def al_salir():                                    # al reiniciar: que no quede un icono fantasma
         try:
-            icon.visible = False
+            actual["icon"].visible = False
         except Exception:
             pass
     srv.AL_SALIR = al_salir
-    icon.run()
-    return True
+
+    # Si Windows no deja crear el icono (sesión aún cargando al iniciar, WinError 5…), se reintenta; y si no se
+    # logra, el servidor sigue funcionando sin icono en vez de caerse.
+    # Pasa cuando el proceso arranca en un escritorio que no le deja crear ventanas (sesión aún cargando,
+    # lanzado por un instalador/agente en otro escritorio…). Primero reintentos rápidos; luego cada minuto, en
+    # silencio, por si el escritorio queda disponible más tarde. El servidor corre en otros hilos todo el tiempo.
+    esperas = (2, 5, 10, 20, 30)
+    intento = 0
+    while True:
+        try:
+            icon = actual["icon"] = pystray.Icon("SupaVicDLNA", imagen_icono(),
+                                                 f"{srv.APP} — {app.cfg['servidor']['nombre']}"[:127],
+                                                 pystray.Menu(*items))
+            reintentos = intento
+
+            def listo(ic):                               # pystray lo llama cuando el icono ya existe
+                ic.visible = True
+                if reintentos:
+                    srv.log.info("Tray icon created after %d retries", reintentos)
+            icon.run(setup=listo)
+            return True
+        except Exception as e:
+            if intento < len(esperas):
+                srv.log.warning("Could not create the tray icon (%s); retrying in %d s", e, esperas[intento])
+                time.sleep(esperas[intento])
+            else:
+                if intento == len(esperas):
+                    srv.log.exception("Tray icon unavailable; the server keeps running without it "
+                                      "(will keep trying every minute)")
+                time.sleep(60)
+            intento += 1
 
 
 # ═══════════════════════════════════════════════════════════════════ main

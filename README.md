@@ -107,7 +107,8 @@ SupaVic (Living room PC)
 │       ├── ▶ All tracks (11)        ← play a whole artist or folder tree at once
 │       ├── 📁 [1998] Blue Hour Sessions (6)
 │       └── 📁 [2005] Afterglow (5)
-├── Artists          → ▶ All tracks · albums by year
+├── Artists          → ▶ All tracks · albums by original year: "Afterglow [2005]"
+├── Track artists    → (optional) everyone who appears on a track, featuring included
 ├── Albums           → A–Z groups when the list is long
 ├── Genres           → artists → albums
 ├── Decades          → albums by year
@@ -119,10 +120,13 @@ SupaVic (Living room PC)
 - **Live folders**: what's on disk now is what you see. New, moved and renamed folders show up right away, and
   players are notified of changes.
 - **Tag views** in the style of MinimServer and MusicBee, built from the cache. They use album artist,
-  multi-value genres (`;` `/`) and artists (`;`), "Various Artists" detection, and natural sorting that ignores
-  accents and "The".
+  multi-valued tags (repeated `ARTIST=`/`GENRE=` fields, or `;` and `/` separators), `originaldate`,
+  `albumsort` and the compilation flag, "Various Artists" detection, and natural sorting that ignores accents and
+  "The". Albums with the same title and artist in different folders (reissues, self-titled albums) stay separate,
+  while `CD1`/`Disc 2` subfolders are merged into one album. Compilations are sorted by title (or `albumsort`).
 - **▶ All tracks** at every level that lists containers, in browse order with no duplicates.
-- **Song counts** in titles: `Korn (15)`.
+- **Counts** in titles: songs (`Korn (15)`) or items (`Korn (4)` albums), or none. The year after the album title
+  is optional too, and so is putting your folders inside a "Folders" entry at the root.
 - **UPnP Search** across title, artist, album and genre.
 - **Stable IDs**: favorites and presets on your player keep working after restarts.
 
@@ -209,14 +213,17 @@ Everything is editable in the control panel (**Settings**). It's stored in `conf
 | `musica.carpetas` | `[]` | Your music folders. With a single folder, its subfolders show at the root |
 | `musica.ignorar` | `*.part`, `.*`, … | Name patterns to hide (case-insensitive) |
 | `musica.ordenar_por_tags_hasta` | `150` | Folders with up to this many files are sorted by disc/track number |
+| `musica.agrupar_carpetas` | `false` | Show your folders inside a "Folders" entry at the root instead of directly at the root |
 | `portadas.tamano` | `600` | Cover size in px (`0` = original file) |
 | `portadas.recortar_cuadrado` | `true` | Crop non-square covers |
 | `precarga.activa` | `true` | Idle prefetch of tags and covers |
 | `precarga.inactividad_min` | `5` | Minutes without browsing before prefetch starts |
 | `precarga.repetir_horas` | `12` | Full pass interval (finds new music) |
-| `vistas.activas` | all | `artistas`, `albumes`, `generos`, `decadas`, `recientes`, `hires`, `aleatorio` |
+| `vistas.activas` | all but `interpretes` | `artistas`, `interpretes` (track artists), `albumes`, `generos`, `decadas`, `recientes`, `hires`, `aleatorio` |
 | `vistas.agrupar_desde` | `200` | Group longer lists by letter (`0` = never) |
-| `vistas.mostrar_conteo` | `true` | Song counts in titles |
+| `vistas.mostrar_conteo` | `true` | Count in parentheses after titles |
+| `vistas.tipo_conteo` | `pistas` | `pistas` = songs; `elementos` = an artist's albums, a genre's artists… (albums get no number) |
+| `vistas.mostrar_anio` | `true` | Year after the album title: `Album [1999]` |
 | `dashboard.puerto` | `8202` | Dashboard port |
 | `dashboard.con_servidor` | `true` | The tray app starts and stops the dashboard with the server |
 | `dashboard.renderers` | `[]` | Extra `description.xml` URLs if a player isn't discovered |

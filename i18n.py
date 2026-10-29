@@ -14,6 +14,8 @@ TEXTOS = {
     "es": {
         # navegación en el reproductor (WiiM, BubbleUPnP…)
         "vista.artistas": "Artistas",
+        "vista.interpretes": "Artistas (por pista)",
+        "carpetas": "Carpetas",
         "vista.albumes": "Álbumes",
         "vista.generos": "Géneros",
         "vista.decadas": "Décadas",
@@ -86,6 +88,8 @@ TEXTOS = {
     },
     "en": {
         "vista.artistas": "Artists",
+        "vista.interpretes": "Track artists",
+        "carpetas": "Folders",
         "vista.albumes": "Albums",
         "vista.generos": "Genres",
         "vista.decadas": "Decades",

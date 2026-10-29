@@ -48,7 +48,7 @@ try:
 except ImportError:          # funciona sin Pillow, pero manda las portadas sin redimensionar
     Image = None
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 APP = "SupaVic DLNA"
 
 
@@ -89,6 +89,7 @@ CONFIG_DEFECTO = {
         "carpetas": [],
         "ignorar": ["*.part", "*.tmp", ".*", "$RECYCLE.BIN", "System Volume Information"],
         "ordenar_por_tags_hasta": 150,
+        "agrupar_carpetas": False,     # True: las carpetas van dentro de una entrada "Carpetas" en la raíz
     },
     "portadas": {
         "tamano": 600,
@@ -105,7 +106,9 @@ CONFIG_DEFECTO = {
         # Navegación por etiquetas (estilo MinimServer/MusicBee) además de las carpetas.
         "activas": ["artistas", "albumes", "generos", "decadas", "recientes", "hires", "aleatorio"],
         "agrupar_desde": 200,          # listas más largas se agrupan por letra (0 = nunca)
-        "mostrar_conteo": True,        # "Korn (15)": canciones en artistas, álbumes, géneros, décadas y carpetas
+        "mostrar_conteo": True,        # "Korn (15)": número entre paréntesis en artistas, álbumes, géneros…
+        "tipo_conteo": "pistas",       # pistas = canciones; elementos = álbumes de un artista, artistas de un género…
+        "mostrar_anio": True,          # "Álbum [1999]": año después del título del álbum
     },
     "dashboard": {
         # Lo usa dashboard.py; aquí solo para que el panel no borre estas claves al guardar.
@@ -256,6 +259,10 @@ def validar_config(nueva):
     v = cfg["vistas"]
     v["activas"] = [x for x in (v["activas"] if isinstance(v["activas"], list) else []) if x in VISTAS]
     v["mostrar_conteo"] = bool(v["mostrar_conteo"])
+    v["mostrar_anio"] = bool(v["mostrar_anio"])
+    if v["tipo_conteo"] not in ("pistas", "elementos"):
+        v["tipo_conteo"] = "pistas"
+    m["agrupar_carpetas"] = bool(m["agrupar_carpetas"])
     cfg["dashboard"]["con_servidor"] = bool(cfg["dashboard"]["con_servidor"])
     try:
         v["agrupar_desde"] = max(0, int(v["agrupar_desde"]))
@@ -305,6 +312,45 @@ def _first(tags, *keys):
     return ""
 
 
+def _unir(valores):
+    """Varios valores de un tag (ARTIST= repetido, ID3 con varios textos…) -> "A; B" sin duplicados."""
+    out = []
+    for v in valores:
+        v = str(v).strip()
+        if v and v not in out:
+            out.append(v)
+    return "; ".join(out)
+
+
+def _todos(tags, *keys):
+    """Todos los valores del primer tag que exista (para artist, albumartist y genre multivalor)."""
+    if tags is None:
+        return ""
+    for k in keys:
+        try:
+            v = tags.get(k)
+        except Exception:
+            v = None
+        if v is None:
+            continue
+        if hasattr(v, "genres"):                              # ID3 TCON: resuelve "(17)" -> "Rock"
+            v = v.genres
+        elif hasattr(v, "text"):
+            v = v.text
+        if not isinstance(v, (list, tuple)):
+            v = [v]
+        s = _unir(x[0] if isinstance(x, tuple) else x for x in v)
+        if s:
+            return s
+    return ""
+
+
+def _bandera(tags, *keys):
+    """True si un tag tipo COMPILATION / TCMP / cpil está activo."""
+    s = _first(tags, *keys).lower()
+    return s in ("1", "true", "yes")
+
+
 def imagenes_embebidas(f):
     """[(tipo, bytes)] de las portadas embebidas en cualquier formato soportado por mutagen."""
     pics = []
@@ -343,16 +389,24 @@ def imagenes_embebidas(f):
     return [p for p in pics if p[1]]
 
 
-def _meta_de_tags(meta, get):
+# Sube cuando cambia lo que se extrae de los tags: la caché se vacía una vez y se vuelve a leer.
+# 2: todos los valores de artist/albumartist/genre, originaldate primero, albumsort y compilation.
+VERSION_LECTOR = 2
+
+
+def _meta_de_tags(meta, get, todos):
+    """get(k) -> primer valor; todos(k) -> todos los valores unidos con "; " (tags Vorbis)."""
     meta["title"] = get("title")
-    meta["artist"] = get("artist")
+    meta["artist"] = todos("artist")
     meta["album"] = get("album")
-    meta["aartist"] = get("albumartist") or get("album artist")
+    meta["aartist"] = todos("albumartist") or todos("album artist")
     meta["track"] = _int(get("tracknumber"))
     meta["disc"] = _int(get("discnumber"))
-    m = re.search(r"\d{4}", get("date") or get("year") or get("originaldate") or "")
+    m = re.search(r"\d{4}", get("originaldate") or get("originalyear") or get("date") or get("year") or "")
     meta["year"] = int(m.group(0)) if m else 0
-    meta["genre"] = get("genre")
+    meta["genre"] = todos("genre")
+    meta["asort"] = get("albumsort")
+    meta["comp"] = 1 if get("compilation").lower() in ("1", "true", "yes") else 0
 
 
 def leer_flac_rapido(ruta):
@@ -382,7 +436,7 @@ def leer_flac_rapido(ruta):
                 for _ in range(n):
                     l = int.from_bytes(d[p:p + 4], "little")
                     k, _, v = d[p + 4:p + 4 + l].decode("utf-8", "replace").partition("=")
-                    tags.setdefault(k.lower(), v.strip())
+                    tags.setdefault(k.lower(), []).append(v.strip())
                     p += 4 + l
             else:
                 if tipo == 6:                             # PICTURE: basta con saber que existe
@@ -398,7 +452,7 @@ def leer_flac_rapido(ruta):
     dur = total / sr if total else 0
     meta = {"dur": round(dur, 3), "sr": sr, "ch": ch, "bits": bits,
             "br": int((tam - inicio_audio) * 8 / dur) if dur else 0}
-    _meta_de_tags(meta, lambda k: tags.get(k, ""))
+    _meta_de_tags(meta, lambda k: next((v for v in tags.get(k, ()) if v), ""), lambda k: _unir(tags.get(k, ())))
     meta["art"] = art
     return {k: v for k, v in meta.items() if v}
 
@@ -428,14 +482,17 @@ def leer_tags(ruta):
         meta["bits"] = int(getattr(info, "bits_per_sample", 0) or 0)
     t = f.tags
     meta["title"] = _first(t, "title", "TIT2", "\xa9nam", "Title")
-    meta["artist"] = _first(t, "artist", "TPE1", "\xa9ART", "Artist")
+    meta["artist"] = _todos(t, "artist", "TPE1", "\xa9ART", "Artist")
     meta["album"] = _first(t, "album", "TALB", "\xa9alb", "Album")
-    meta["aartist"] = _first(t, "albumartist", "album artist", "TPE2", "aART", "Album Artist")
+    meta["aartist"] = _todos(t, "albumartist", "album artist", "TPE2", "aART", "Album Artist")
     meta["track"] = _int(_first(t, "tracknumber", "TRCK", "trkn", "Track"))
     meta["disc"] = _int(_first(t, "discnumber", "TPOS", "disk", "Disc"))
-    m = re.search(r"\d{4}", _first(t, "date", "year", "originaldate", "TDRC", "TYER", "TDOR", "\xa9day", "Year"))
+    m = re.search(r"\d{4}", _first(t, "originaldate", "originalyear", "TDOR", "TXXX:originalyear", "date", "year",
+                                     "TDRC", "TYER", "\xa9day", "Year"))
     meta["year"] = int(m.group(0)) if m else 0
-    meta["genre"] = _first(t, "genre", "TCON", "\xa9gen", "Genre")
+    meta["genre"] = _todos(t, "genre", "TCON", "\xa9gen", "Genre")
+    meta["asort"] = _first(t, "albumsort", "TSOA", "soal", "ALBUMSORT")
+    meta["comp"] = 1 if _bandera(t, "compilation", "TCMP", "cpil", "Compilation") else 0
     meta["art"] = bool(imagenes_embebidas(f))
     return {k: v for k, v in meta.items() if v}
 
@@ -452,6 +509,13 @@ class CacheTags:
         self.db.execute("CREATE TABLE IF NOT EXISTS pistas (ruta TEXT PRIMARY KEY, mtime INTEGER, tam INTEGER, meta TEXT)")
         # identidad del archivo independiente de la ruta: mover un álbum no obliga a releerlo
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_identidad ON pistas (tam, mtime)")
+        v = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if v < VERSION_LECTOR:
+            n = self.db.execute("SELECT COUNT(*) FROM pistas").fetchone()[0]
+            if n:
+                log.info("Tag reader updated (v%d -> v%d): %d cached tracks will be read again", v, VERSION_LECTOR, n)
+                self.db.execute("DELETE FROM pistas")
+            self.db.execute(f"PRAGMA user_version={VERSION_LECTOR}")
         self.reubicados = 0
         self.version = 0                  # sube con cada cambio; el índice por etiquetas se reconstruye al cambiar
         self.lock = threading.Lock()
@@ -746,12 +810,12 @@ class Biblioteca:
     def hijos(self, oid):
         """Lista de descriptores ('raiz', key) | ('d', key, rel) | ('t', key, rel, mtime, tam) o None si no existe."""
         if oid == "0":
-            raices = self.raices_disponibles()
-            if len(raices) == 1:
-                base = self.hijos(f"d{raices[0][0]}:") or []
-            else:
-                base = [("raiz", k) for k, _, _ in raices]
+            base = self.hijos_raiz()
+            if base and self.app.cfg["musica"]["agrupar_carpetas"]:          # todas las carpetas bajo "Carpetas"
+                base = [("v", "v:carpetas", T("carpetas"), len(base), None, "object.container.storageFolder", None, None)]
             return base + self.app.indice.raiz()
+        if oid == "v:carpetas":
+            return self.hijos_raiz()
         if oid.startswith("v:"):
             return self.app.indice.hijos(oid)
         m = re.fullmatch(r"d([0-9a-f]{8}):(.*)", oid, re.S)
@@ -772,9 +836,12 @@ class Biblioteca:
 
             def orden(p):
                 mm = metas.get(os.path.join(ruta, p[0])) or self.meta_ruta(key, pre + p[0])
-                tr = mm.get("track", 0)
-                return (0 if tr else 1, mm.get("disc", 0), tr, natkey(p[0]))
-            pistas.sort(key=orden)
+                tr = _int(mm.get("track", 0))
+                return (0 if tr else 1, _int(mm.get("disc", 0)), tr, natkey(p[0]))
+            try:
+                pistas.sort(key=orden)
+            except Exception:
+                log.exception("Sorting %s by tags failed; using file names", ruta)
         out += [("t", key, pre + n, mt, sz) for n, mt, sz in pistas]
         if l[0] and self.app.indice.asegurar(espera=1.0) is not None:   # carpeta con subcarpetas: "▶ Todas las pistas"
             n = self.app.indice.conteo_carpeta(key, rel)          # el número sale del índice; la lista solo al entrar
@@ -782,10 +849,23 @@ class Biblioteca:
                 out.insert(0, self.app.indice._entrada_todas(f"v:carpeta:{key}:{rel}", n))
         return out
 
+    def hijos_raiz(self):
+        """Carpetas configuradas; con una sola, directamente su contenido."""
+        raices = self.raices_disponibles()
+        if len(raices) == 1:
+            return self.hijos(f"d{raices[0][0]}:") or []
+        return [("raiz", k) for k, _, _ in raices]
+
+    def padre_raices(self):
+        return "v:carpetas" if self.app.cfg["musica"]["agrupar_carpetas"] else "0"
+
     def metadata(self, oid):
         """(descriptor, parentID) para BrowseMetadata."""
         if oid == "0":
             return ("cero",), "-1"
+        if oid == "v:carpetas":
+            return ("v", oid, T("carpetas"), len(self.hijos_raiz()), None, "object.container.storageFolder",
+                    None, None), "0"
         if oid.startswith("v:"):
             return self.app.indice.metadata(oid)
         m = re.fullmatch(r"([dt])([0-9a-f]{8}):(.*)", oid, re.S)
@@ -797,9 +877,9 @@ class Biblioteca:
             return None, None
         unica = len(self.raices_disponibles()) == 1
         if tipo == "d" and rel == "":
-            return ("raiz", key), "0"
+            return ("raiz", key), self.padre_raices()
         prel = self.padre_rel(rel)
-        parent = "0" if (prel == "" and unica) else f"d{key}:{prel}"
+        parent = self.padre_raices() if (prel == "" and unica) else f"d{key}:{prel}"
         if tipo == "d":
             return ("d", key, rel), parent
         st = os.stat(ruta)
@@ -822,11 +902,14 @@ class Biblioteca:
             metas = self.app.tags.obtener(rutas, espera=1.5)
         out = []
         for d in descs:
-            if d[0] == "t":
-                mm = metas.get(self.resolver(d[1], d[2])) or self.meta_ruta(d[1], d[2])
-                out.append(self._item(d, parent, base, mm))
-            else:
-                out.append(self._contenedor(d, parent, base))
+            try:                                         # un archivo o carpeta problemático no tumba la página entera
+                if d[0] == "t":
+                    mm = metas.get(self.resolver(d[1], d[2])) or self.meta_ruta(d[1], d[2])
+                    out.append(self._item(d, parent, base, mm))
+                else:
+                    out.append(self._contenedor(d, parent, base))
+            except Exception:
+                log.exception("Skipping %r while rendering %r", d[:3], parent)
         return out
 
     def _contenedor(self, d, parent, base):
@@ -845,7 +928,7 @@ class Biblioteca:
         l = self.listar(ruta, ttl=None, validar=False)   # un solo listado para childCount y el conteo del título
         if self.app.cfg["vistas"]["mostrar_conteo"]:
             n = max(self.app.indice.conteo_carpeta(key, rel), len(l[1]) if l else 0)
-            titulo += self.app.indice.suf(n)
+            titulo += self.app.indice.suf(n, (len(l[0]) + len(l[1])) if l else 0)
         qrel = quote(rel, safe="/")
         art = f"{base}/art/d/{key}/{qrel}{'/' if qrel else ''}cover.jpg"
         return self._xml_cont(self.oid(d), parent, titulo, (len(l[0]) + len(l[1])) if l else 0, art)
@@ -981,7 +1064,7 @@ def generar_portada(src, tamano, recortar):
 
 # ═══════════════════════════════════════════════════════════════════════════ vistas por etiquetas
 
-CLAVES_VISTAS = ("artistas", "albumes", "generos", "decadas", "recientes", "hires", "aleatorio")
+CLAVES_VISTAS = ("artistas", "interpretes", "albumes", "generos", "decadas", "recientes", "hires", "aleatorio")
 VISTAS = OrderedDict((k, k) for k in CLAVES_VISTAS)      # clave -> nombre visible (lo llena aplicar_idioma)
 ARTICULOS = ("the ",)          # como MusicBee/MinimServer: "The Cure" en la C; "Los Prisioneros" se queda en la L
 C_ALBUM, C_ARTISTA, C_GENERO = "object.container.album.musicAlbum", "object.container.person.musicArtist", "object.container.genre.musicGenre"
@@ -1019,6 +1102,18 @@ def _hid(*partes):
 
 def _multi(v, seps=";"):
     return [x.strip() for x in re.split("[" + re.escape(seps) + "]", v or "") if x.strip()]
+
+
+_RE_DISCO = re.compile(r"(?i)^\s*[\[(]?\s*(cd|disc|disk|disco|disque|vol(ume)?\.?)\s*[-_.]?\s*\d+\b")
+
+
+def _carpeta_album(carpeta):
+    """Carpeta que representa al álbum: 'Artista/Álbum/CD2' -> 'Artista/Álbum' (discos en subcarpetas)."""
+    if "/" in carpeta:
+        padre, ultima = carpeta.rsplit("/", 1)
+    else:
+        padre, ultima = "", carpeta
+    return padre if ultima and _RE_DISCO.match(ultima) else carpeta
 
 
 class Indice:
@@ -1093,9 +1188,13 @@ class Indice:
             vigentes.sort(key=lambda x: x[0][0])
             pistas, albumes = [], {}
             ids_alb, generos_txt = {}, {}               # memos: un hash por álbum y un split por género, no por pista
-            conservar = ("title", "artist", "aartist", "album", "track", "disc", "year", "genre", "bits", "sr")
+            conservar = ("title", "artist", "aartist", "album", "track", "disc", "year", "genre", "bits", "sr",
+                         "asort", "comp")
             repetidos = ("artist", "aartist", "album", "genre")      # mismo texto en muchas pistas: una sola copia
             intern = sys.intern
+            # 1) pistas + "álbum crudo" (título, artista del álbum). Se anota en qué carpetas aparece cada uno:
+            #    el mismo título del mismo artista en carpetas distintas (reediciones, homónimos) son álbumes distintos.
+            crudos, carpetas_de = [], defaultdict(set)
             for (ruta, mt, tam, js), kr in vigentes:
                 completo = json.loads(js)
                 m = {k: completo[k] for k in conservar if k in completo}
@@ -1104,22 +1203,32 @@ class Indice:
                         m[k] = intern(m[k])
                 key, rel = kr
                 carpeta = rel.rsplit("/", 1)[0] if "/" in rel else ""
-                i = len(pistas)
                 pistas.append({"key": key, "rel": rel, "mt": mt, "tam": tam, "m": m, "dir": intern(carpeta)})
                 alb = m.get("album") or (carpeta.rsplit("/", 1)[-1] if carpeta else self.app.bib.raices[key][1])
                 aa = m.get("aartist", "")
                 crudo = (alb, aa if aa else f"{key}/{carpeta}")
-                aid = ids_alb.get(crudo)
+                dalb = f"{key}/{_carpeta_album(carpeta)}"
+                crudos.append((crudo, dalb))
+                carpetas_de[crudo].add(dalb)
+            # 2) álbumes
+            for i, p in enumerate(pistas):
+                m, (crudo, dalb) = p["m"], crudos[i]
+                ck = crudo if len(carpetas_de[crudo]) == 1 else crudo + (dalb,)   # IDs estables si no hay homónimos
+                aid = ids_alb.get(ck)
                 if aid is None:
-                    aid = ids_alb[crudo] = _hid(*crudo)
+                    aid = ids_alb[ck] = _hid(*ck)
                 a = albumes.get(aid)
                 if a is None:
-                    a = albumes[aid] = {"id": aid, "titulo": alb, "aa": aa, "artistas": Counter(), "anio": 0, "pistas": [],
-                                        "key": key, "dir": carpeta, "mt": 0, "hires": False, "generos": set()}
+                    a = albumes[aid] = {"id": aid, "titulo": crudo[0], "aa": m.get("aartist", ""), "artistas": Counter(),
+                                        "anio": 0, "pistas": [], "key": p["key"], "dir": p["dir"], "mt": 0,
+                                        "hires": False, "generos": set(), "asort": "", "comp": False}
+                p["al"] = aid
                 a["pistas"].append(i)
                 a["artistas"][m.get("artist", "")] += 1
                 a["anio"] = max(a["anio"], m.get("year", 0))
-                a["mt"] = max(a["mt"], mt)
+                a["mt"] = max(a["mt"], p["mt"])
+                a["asort"] = a["asort"] or m.get("asort", "")
+                a["comp"] = a["comp"] or bool(m.get("comp"))
                 if (m.get("bits") or 0) > 16 or (m.get("sr") or 0) > 48000:
                     a["hires"] = True
                 gtxt = m.get("genre")
@@ -1128,13 +1237,15 @@ class Indice:
                     if gs is None:
                         gs = generos_txt[gtxt] = _multi(gtxt, ";/")
                     a["generos"].update(gs)
-            artistas, generos = {}, {}
+            artistas, generos, interpretes = {}, {}, {}
+            varios = T("varios")
             for a in albumes.values():
                 if a["aa"]:
                     a["artista"] = a["aa"]
                 else:
                     nombres = [n for n in a["artistas"] if n]
-                    a["artista"] = nombres[0] if len(nombres) == 1 else (T("varios") if nombres else T("desconocido"))
+                    a["artista"] = (nombres[0] if len(nombres) == 1 and not a["comp"]
+                                    else (varios if nombres else T("desconocido")))
                 a["pistas"].sort(key=lambda i: (pistas[i]["m"].get("disc", 0), pistas[i]["m"].get("track", 0) or 999,
                                                 pistas[i]["rel"]))       # nombres "NN. Título": desempate simple basta
                 for n in _multi(a["artista"]):
@@ -1144,16 +1255,25 @@ class Indice:
                     ge = generos.setdefault(_hid(g), {"id": _hid(g), "nombre": g, "artistas": {}})
                     for n in _multi(a["artista"]):
                         ge["artistas"].setdefault(_hid(n), []).append(a["id"])
+                for i in a["pistas"]:                            # artistas de pista (featuring, compilaciones…)
+                    for n in _multi(pistas[i]["m"].get("artist", "")):
+                        ip = interpretes.setdefault(_hid(n), {"id": _hid(n), "nombre": n, "albumes": {}})
+                        ip["albumes"].setdefault(a["id"], []).append(i)
             por_anio = lambda aid: (albumes[aid]["anio"] or 9999, _orden(albumes[aid]["titulo"]))
-            for ar in artistas.values():
-                ar["albumes"].sort(key=por_anio)
+            por_titulo = lambda aid: (_orden(albumes[aid]["asort"] or albumes[aid]["titulo"]),)
+            for ar in artistas.values():                         # compilaciones: por título (o albumsort), no por año
+                ar["albumes"].sort(key=por_titulo if ar["nombre"] == varios else por_anio)
             for ge in generos.values():
-                for k in ge["artistas"]:
-                    ge["artistas"][k].sort(key=por_anio)
+                for k, l in ge["artistas"].items():
+                    l.sort(key=por_titulo if artistas.get(k, {}).get("nombre") == varios else por_anio)
+            for ip in interpretes.values():
+                ip["orden"] = sorted(ip["albumes"], key=por_anio)
             d = {
-                "pistas": pistas, "albumes": albumes, "artistas": artistas, "generos": generos,
+                "pistas": pistas, "albumes": albumes, "artistas": artistas, "generos": generos, "interpretes": interpretes,
                 "orden_artistas": sorted(artistas, key=lambda k: _orden(artistas[k]["nombre"])),
-                "orden_albumes": sorted(albumes, key=lambda k: (_orden(albumes[k]["titulo"]), _orden(albumes[k]["artista"]))),
+                "orden_interpretes": sorted(interpretes, key=lambda k: _orden(interpretes[k]["nombre"])),
+                "orden_albumes": sorted(albumes, key=lambda k: (_orden(albumes[k]["asort"] or albumes[k]["titulo"]),
+                                                               _orden(albumes[k]["artista"]), albumes[k]["anio"])),
                 "orden_generos": sorted(generos, key=lambda k: _orden(generos[k]["nombre"])),
                 "recientes": sorted(albumes, key=lambda k: -albumes[k]["mt"])[:200],
                 "hires": sorted((k for k in albumes if albumes[k]["hires"]),
@@ -1192,8 +1312,18 @@ class Indice:
                 "artistas": len(d["artistas"]) if d else 0, "generos": len(d["generos"]) if d else 0}
 
     # ---- conteos ("Korn (15)")
-    def suf(self, n):
-        return f" ({n:,})" if self.app.cfg["vistas"]["mostrar_conteo"] and n else ""
+    def suf(self, pistas, elementos=None):
+        """Sufijo de conteo: " (15)". tipo_conteo = "pistas" (canciones) o "elementos" (álbumes de un artista,
+        artistas de un género…; los álbumes no llevan número porque sus hijos son las pistas)."""
+        v = self.app.cfg["vistas"]
+        if not v["mostrar_conteo"]:
+            return ""
+        n = elementos if v.get("tipo_conteo") == "elementos" else pistas
+        return f" ({n:,})" if n else ""
+
+    def con_anio(self, a, titulo=None):
+        t = titulo or a["titulo"]
+        return f"{t} [{a['anio']}]" if a["anio"] and self.app.cfg["vistas"].get("mostrar_anio") and not titulo else t
 
     def n_albumes(self, d, aids):
         return sum(len(d["albumes"][a]["pistas"]) for a in set(aids))
@@ -1209,14 +1339,27 @@ class Indice:
 
     def _c_album(self, d, aid, oid=None, titulo=None):
         a = d["albumes"][aid]
-        return ("v", oid or f"v:al:{aid}", (titulo or a["titulo"]) + self.suf(len(a["pistas"])), len(a["pistas"]),
+        return ("v", oid or f"v:al:{aid}", self.con_anio(a, titulo) + self.suf(len(a["pistas"])), len(a["pistas"]),
                 self._art_album(a), C_ALBUM, a["artista"], a["anio"] or None)
+
+    def _c_album_ia(self, d, iid, aid):
+        """Álbum dentro de un artista de pista: solo cuenta (y contiene) las pistas de ese artista."""
+        a, n = d["albumes"][aid], len(d["interpretes"][iid]["albumes"][aid])
+        return ("v", f"v:ia:{iid}:al:{aid}", self.con_anio(a) + self.suf(n), n, self._art_album(a), C_ALBUM,
+                a["artista"], a["anio"] or None)
+
+    def _c_interprete(self, d, iid):
+        ip = d["interpretes"][iid]
+        art = self._art_album(d["albumes"][ip["orden"][0]]) if ip["orden"] else None
+        n = sum(len(l) for l in ip["albumes"].values())
+        return ("v", f"v:ia:{iid}", ip["nombre"] + self.suf(n, len(ip["orden"])),
+                len(ip["orden"]) + 1, art, C_ARTISTA, None, None)
 
     def _c_artista(self, d, arid, oid=None, albumes=None):
         ar = d["artistas"][arid]
         albs = albumes if albumes is not None else ar["albumes"]
         art = self._art_album(d["albumes"][albs[0]]) if albs else None
-        return ("v", oid or f"v:ar:{arid}", ar["nombre"] + self.suf(self.n_albumes(d, albs)),
+        return ("v", oid or f"v:ar:{arid}", ar["nombre"] + self.suf(self.n_albumes(d, albs), len(albs)),
                 len(albs) + (1 if len(albs) else 0), art, C_ARTISTA, None, None)
 
     def _t(self, d, i):
@@ -1231,7 +1374,8 @@ class Indice:
         for k in ids:
             grupos.setdefault(_letra(nombre_de(k)), []).append(k)
         orden = sorted(grupos, key=lambda g: (g == "#", g == "0-9", g))
-        return [("v", f"{oid_base}@{g}", g + (self.suf(sum(pistas_de(k) for k in grupos[g])) if pistas_de else ""),
+        return [("v", f"{oid_base}@{g}", g + (self.suf(sum(pistas_de(k) for k in grupos[g]), len(grupos[g]))
+                                              if pistas_de else ""),
                  len(grupos[g]), None, "object.container.storageFolder", None, None) for g in orden]
 
     def raiz(self):
@@ -1246,7 +1390,7 @@ class Indice:
         return out
 
     LIMITE_TODAS = 3000
-    SIN_TODAS = {"v:artistas", "v:albumes", "v:generos", "v:decadas", "v:aleatorio", "v:indexando"}
+    SIN_TODAS = {"v:artistas", "v:interpretes", "v:albumes", "v:generos", "v:decadas", "v:aleatorio", "v:indexando"}
 
     def _entrada_todas(self, base, n):
         tit = (T("todas", n=f"{n:,}") if n <= self.LIMITE_TODAS
@@ -1326,6 +1470,18 @@ class Indice:
                     return [self._c_artista(d, k) for k in ids]
                 return self._agrupar("v:artistas", ids, lambda k: d["artistas"][k]["nombre"], lambda k: self._c_artista(d, k),
                                      lambda k: self.n_albumes(d, d["artistas"][k]["albumes"]))
+            if vista == "interpretes":
+                ids = d["orden_interpretes"]
+                if letra:
+                    return [self._c_interprete(d, k) for k in ids if _letra(d["interpretes"][k]["nombre"]) == letra]
+                return self._agrupar("v:interpretes", ids, lambda k: d["interpretes"][k]["nombre"],
+                                     lambda k: self._c_interprete(d, k),
+                                     lambda k: sum(len(l) for l in d["interpretes"][k]["albumes"].values()))
+            if vista == "ia":                               # artista de pista -> sus álbumes -> solo sus pistas
+                ip = d["interpretes"][partes[1]]
+                if len(partes) > 3 and partes[2] == "al":
+                    return [self._t(d, i) for i in ip["albumes"][partes[3]]]
+                return [self._c_album_ia(d, partes[1], a) for a in ip["orden"]]
             if vista == "albumes":
                 ids = d["orden_albumes"]
                 if letra:
@@ -1334,12 +1490,13 @@ class Indice:
                                      lambda k: len(d["albumes"][k]["pistas"]))
             if vista == "generos":
                 return [("v", f"v:ge:{g}", d["generos"][g]["nombre"]
-                         + self.suf(self.n_albumes(d, [a for l in d["generos"][g]["artistas"].values() for a in l])),
+                         + self.suf(self.n_albumes(d, [a for l in d["generos"][g]["artistas"].values() for a in l]),
+                                    len(d["generos"][g]["artistas"])),
                          len(d["generos"][g]["artistas"]),
                          self._art_album(d["albumes"][next(iter(d["generos"][g]["artistas"].values()))[0]]),
                          C_GENERO, None, None) for g in d["orden_generos"]]
             if vista == "decadas":
-                return [("v", f"v:de:{dec}", f"{dec}s" + self.suf(self.n_albumes(d, d["decadas"][dec])), len(d["decadas"][dec]), self._art_album(d["albumes"][d["decadas"][dec][0]]),
+                return [("v", f"v:de:{dec}", f"{dec}s" + self.suf(self.n_albumes(d, d["decadas"][dec]), len(d["decadas"][dec])), len(d["decadas"][dec]), self._art_album(d["albumes"][d["decadas"][dec][0]]),
                          "object.container.storageFolder", None, None) for dec in sorted(d["decadas"])]
             if vista == "recientes":
                 return [self._c_album(d, k) for k in d["recientes"]]
@@ -1370,7 +1527,8 @@ class Indice:
         v = partes[0]
         if v in VISTAS or v.split("@")[0] in VISTAS:
             return "v:" + v.split("@")[0] if "@" in v else "0"
-        return {"ar": "v:artistas", "al": "v:albumes", "ge": "v:generos", "de": "v:decadas"}.get(v, "0") \
+        return {"ar": "v:artistas", "ia": "v:interpretes", "al": "v:albumes", "ge": "v:generos",
+                "de": "v:decadas"}.get(v, "0") \
             if len(partes) <= 2 else f"v:{v}:{partes[1]}"
 
     def metadata(self, oid):
@@ -1398,6 +1556,10 @@ class Indice:
             elif v == "ge" and len(partes) == 4:
                 ge = d["generos"][partes[1]]
                 desc = self._c_artista(d, partes[3], oid=oid, albumes=ge["artistas"][partes[3]])
+            elif v == "ia" and len(partes) == 2:
+                desc = self._c_interprete(d, partes[1])
+            elif v == "ia" and len(partes) == 4:
+                desc = self._c_album_ia(d, partes[1], partes[3])
             else:
                 hijos = self.hijos(oid)
                 if hijos is None:
@@ -1423,6 +1585,9 @@ class Indice:
                 return f"{T('t.album')} / {a['artista']} — {a['titulo']}"
             if v == "ar":
                 return f"{T('t.artista')} / {d['artistas'][partes[1]]['nombre']}"
+            if v == "ia":
+                t = f"{T('t.artista')} / {d['interpretes'][partes[1]]['nombre']}"
+                return t + (f" / {d['albumes'][partes[3]]['titulo']}" if len(partes) > 3 else "")
             if v == "ge":
                 t = f"{T('t.genero')} / {d['generos'][partes[1]]['nombre']}"
                 return t + (f" / {d['artistas'][partes[3]]['nombre']}" if len(partes) > 3 else "")
@@ -1951,6 +2116,8 @@ class App:
         """Ruta legible de un ObjectID para el dashboard: 'Discografia_FLAC/Bill Evans'."""
         if oid == "0":
             return "/"
+        if oid == "v:carpetas":
+            return T("carpetas")
         if oid.startswith("v:"):
             return self.indice.titulo(oid)
         m = re.fullmatch(r"[dt]([0-9a-f]{8}):(.*)", oid, re.S)
@@ -2742,8 +2909,12 @@ footer{max-width:980px;margin:auto;padding:0 16px 40px;color:var(--mut);font-siz
     <label class="chk"><input type="checkbox" id="p-port"> <span data-i="p.port"></span></label>
     <h3 class="f" data-i="v.titulo"></h3>
     <div id="v-lista"></div>
-    <label class="chk"><input type="checkbox" id="v-conteo"> <span data-i="v.conteo"></span></label>
-    <div class="row"><div><label for="v-agr" data-i="v.agr"></label><input type="number" id="v-agr" min="0"></div><div></div></div>
+    <label class="chk"><input type="checkbox" id="v-anio"> <span data-i="v.anio"></span></label>
+    <label class="chk"><input type="checkbox" id="v-carp"> <span data-i="v.carp"></span></label>
+    <div class="row">
+      <div><label for="v-conteo" data-i="v.conteo"></label><select id="v-conteo"><option value="pistas" data-i="v.conteo.pistas"></option><option value="elementos" data-i="v.conteo.elem"></option><option value="no" data-i="v.conteo.no"></option></select></div>
+      <div><label for="v-agr" data-i="v.agr"></label><input type="number" id="v-agr" min="0"></div>
+    </div>
     <label for="f-ign" data-i="f.ign"></label><textarea id="f-ign"></textarea>
     <div class="acts"><button class="btn pri" id="f-guardar" data-i="btn.guardarAj"></button></div>
     <div class="msg" id="f-msg"></div>
@@ -2775,7 +2946,7 @@ es:{"cargando":"cargando…","enlinea":"● En línea","sinconexion":"● Sin co
 "f.cache":"Carpeta de caché <span class=\"hint\">tags y portadas; mejor en un SSD (reinicia el servidor)</span>","f.cache.ph":"vacío = carpeta de datos",
 "f.crop":"Recortar portadas no cuadradas (miniaturas 16:9 de YouTube)","f.abrir":"Abrir este panel al iniciar el servidor a mano","f.dash":"Iniciar el dashboard junto con el servidor (icono de bandeja)",
 "p.titulo":"Precarga en reposo","p.activa":"Llenar la caché (tags y portadas) cuando el servidor esté inactivo","p.min":"Minutos sin navegación para empezar","p.horas":"Repetir pasada completa cada (horas) <span class=\"hint\">detecta música nueva</span>","p.port":"Generar también las portadas",
-"v.titulo":"Vistas por etiquetas <span class=\"hint\">aparecen en la raíz, después de las carpetas</span>","v.conteo":"Mostrar número de canciones en artistas, álbumes, géneros y carpetas — \"Korn (15)\"","v.agr":"Agrupar por letra listas de más de <span class=\"hint\">0 = nunca</span>",
+"v.titulo":"Vistas por etiquetas <span class=\"hint\">aparecen en la raíz, después de las carpetas</span>","v.conteo":"Número entre paréntesis — \"Korn (15)\"","v.conteo.pistas":"Canciones","v.conteo.elem":"Elementos (álbumes de un artista, artistas de un género…)","v.conteo.no":"No mostrar","v.anio":"Mostrar el año después del título del álbum — \"Álbum [1999]\"","v.carp":"Agrupar las carpetas dentro de una entrada \"Carpetas\" en la raíz","v.agr":"Agrupar por letra listas de más de <span class=\"hint\">0 = nunca</span>",
 "f.ign":"Ignorar <span class=\"hint\">un patrón por línea, sin distinguir mayúsculas (*.part, .*, nombres exactos)</span>","btn.guardarAj":"Guardar ajustes","h.mant":"Mantenimiento",
 "mant.txt":"Borrar la caché obliga a releer tags y portadas al navegar (útil si cambiaste tags sin modificar los archivos).","btn.borrar":"Borrar caché","btn.reiniciar":"Reiniciar servidor","btn.actualizar":"Actualizar",
 "dlg.titulo":"Elegir carpeta","dlg.cancelar":"Cancelar","dlg.usar":"Usar esta carpeta","dlg.unidades":"Unidades","dlg.vacia":"Sin subcarpetas",
@@ -2797,7 +2968,7 @@ en:{"cargando":"loading…","enlinea":"● Online","sinconexion":"● Offline","
 "f.cache":"Cache folder <span class=\"hint\">tags and covers; best on an SSD (restarts the server)</span>","f.cache.ph":"empty = data folder",
 "f.crop":"Crop non-square covers (16:9 YouTube thumbnails)","f.abrir":"Open this panel when the server is started manually","f.dash":"Start the dashboard with the server (tray icon)",
 "p.titulo":"Idle prefetch","p.activa":"Fill the cache (tags and covers) while the server is idle","p.min":"Minutes without browsing before starting","p.horas":"Repeat a full pass every (hours) <span class=\"hint\">picks up new music</span>","p.port":"Generate covers too",
-"v.titulo":"Tag views <span class=\"hint\">shown at the root, after the folders</span>","v.conteo":"Show song counts on artists, albums, genres and folders — \"Korn (15)\"","v.agr":"Group lists longer than this by letter <span class=\"hint\">0 = never</span>",
+"v.titulo":"Tag views <span class=\"hint\">shown at the root, after the folders</span>","v.conteo":"Count in parentheses — \"Korn (15)\"","v.conteo.pistas":"Songs","v.conteo.elem":"Items (an artist's albums, a genre's artists…)","v.conteo.no":"Don't show","v.anio":"Show the year after the album title — \"Album [1999]\"","v.carp":"Put folders inside a \"Folders\" entry at the root","v.agr":"Group lists longer than this by letter <span class=\"hint\">0 = never</span>",
 "f.ign":"Ignore <span class=\"hint\">one pattern per line, case-insensitive (*.part, .*, exact names)</span>","btn.guardarAj":"Save settings","h.mant":"Maintenance",
 "mant.txt":"Clearing the cache forces tags and covers to be read again while browsing (useful if you edited tags without changing the files).","btn.borrar":"Clear cache","btn.reiniciar":"Restart server","btn.actualizar":"Refresh",
 "dlg.titulo":"Choose folder","dlg.cancelar":"Cancel","dlg.usar":"Use this folder","dlg.unidades":"Drives","dlg.vacia":"No subfolders",
@@ -2809,7 +2980,7 @@ en:{"cargando":"loading…","enlinea":"● Online","sinconexion":"● Offline","
 "sinCarpetas":"No folders yet. Add at least one.","quitar":"Remove","guardado":"Saved.","reiniciando":"Restarting…","error":"Error","cacheBorrada":"Cache cleared ({n} covers).","vacio":"(empty)",
 "pie":"SupaVic DLNA {v} · Python {py} · data in {d}"}}[LANG]||{};
 const t=(k,o)=>{let s=TXT[k]??k;if(o)for(const x in o)s=s.split("{"+x+"}").join(o[x]);return s};
-const LOC=navigator.language&&navigator.language.toLowerCase().startsWith(LANG)?navigator.language:(LANG==="es"?"es-MX":"en-US");
+const LOC=(()=>{const d=LANG==="es"?"es-MX":"en-US",l=navigator.language||"";try{if(l.toLowerCase().startsWith(LANG)){new Intl.NumberFormat(l);return l}}catch(e){}return d})();
 const nf=n=>Number(n||0).toLocaleString(LOC);
 document.querySelectorAll("[data-i]").forEach(e=>e.innerHTML=t(e.dataset.i));
 document.querySelectorAll("[data-ip]").forEach(e=>e.placeholder=t(e.dataset.ip));
@@ -2885,7 +3056,7 @@ async function cargarConfig(){
   $("#f-nombre").value=cfg.servidor.nombre;$("#f-puerto").value=cfg.servidor.puerto;$("#f-ip").value=cfg.servidor.ip;$("#f-idioma").value=cfg.servidor.idioma||"auto";
   $("#f-tam").value=cfg.portadas.tamano;$("#f-crop").checked=cfg.portadas.recortar_cuadrado;
   $("#f-orden").value=cfg.musica.ordenar_por_tags_hasta;$("#f-cache").value=cfg.cache.directorio;
-  $("#v-agr").value=cfg.vistas.agrupar_desde;$("#v-conteo").checked=cfg.vistas.mostrar_conteo;pintarVistas();
+  $("#v-agr").value=cfg.vistas.agrupar_desde;$("#v-conteo").value=cfg.vistas.mostrar_conteo?(cfg.vistas.tipo_conteo||"pistas"):"no";$("#v-anio").checked=cfg.vistas.mostrar_anio;$("#v-carp").checked=cfg.musica.agrupar_carpetas;pintarVistas();
   $("#f-abrir").checked=cfg.servidor.abrir_navegador;$("#f-dash").checked=cfg.dashboard.con_servidor;
   $("#p-activa").checked=cfg.precarga.activa;$("#p-min").value=cfg.precarga.inactividad_min;
   $("#p-horas").value=cfg.precarga.repetir_horas;$("#p-port").checked=cfg.precarga.portadas;$("#f-ign").value=cfg.musica.ignorar.join("\n");
@@ -2903,7 +3074,7 @@ $("#f-guardar").onclick=()=>{const n=structuredClone(cfg);
   n.servidor.nombre=$("#f-nombre").value;n.servidor.puerto=+$("#f-puerto").value;n.servidor.ip=$("#f-ip").value.trim();n.servidor.idioma=$("#f-idioma").value;
   n.portadas.tamano=+$("#f-tam").value;n.portadas.recortar_cuadrado=$("#f-crop").checked;
   n.musica.ordenar_por_tags_hasta=+$("#f-orden").value;n.cache.directorio=$("#f-cache").value.trim();
-  n.vistas.activas=[...document.querySelectorAll("#v-lista input:checked")].map(x=>x.value);n.vistas.agrupar_desde=+$("#v-agr").value;n.vistas.mostrar_conteo=$("#v-conteo").checked;
+  if(document.querySelector("#v-lista input"))n.vistas.activas=[...document.querySelectorAll("#v-lista input:checked")].map(x=>x.value);n.vistas.agrupar_desde=+$("#v-agr").value;const vc=$("#v-conteo").value;n.vistas.mostrar_conteo=vc!=="no";if(vc!=="no")n.vistas.tipo_conteo=vc;n.vistas.mostrar_anio=$("#v-anio").checked;n.musica.agrupar_carpetas=$("#v-carp").checked;
   n.servidor.abrir_navegador=$("#f-abrir").checked;n.dashboard.con_servidor=$("#f-dash").checked;
   n.precarga.activa=$("#p-activa").checked;n.precarga.inactividad_min=+$("#p-min").value;
   n.precarga.repetir_horas=+$("#p-horas").value;n.precarga.portadas=$("#p-port").checked;n.musica.ignorar=$("#f-ign").value.split("\n").map(s=>s.trim()).filter(Boolean);

@@ -107,7 +107,8 @@ SupaVic (PC de la sala)
 │       ├── ▶ Todas las pistas (11)  ← reproduce un artista o un árbol de carpetas completo
 │       ├── 📁 [1998] Blue Hour Sessions (6)
 │       └── 📁 [2005] Afterglow (5)
-├── Artistas                 → ▶ Todas las pistas · álbumes por año
+├── Artistas                 → ▶ Todas las pistas · álbumes por año original: "Afterglow [2005]"
+├── Artistas (por pista)     → (opcional) todos los que aparecen en una pista, featuring incluidos
 ├── Álbumes                  → grupos A–Z cuando la lista es larga
 ├── Géneros                  → artistas → álbumes
 ├── Décadas                  → álbumes por año
@@ -119,10 +120,13 @@ SupaVic (PC de la sala)
 - **Carpetas en vivo**: ves lo que hay en el disco ahora. Las carpetas nuevas, movidas o renombradas aparecen al
   instante, y los reproductores reciben aviso de los cambios.
 - **Vistas por etiquetas** al estilo MinimServer y MusicBee, construidas desde la caché. Usan el artista del álbum,
-  géneros multivalor (`;` `/`) y artistas multivalor (`;`), detectan "Varios artistas" y ordenan de forma natural
-  ignorando acentos y "The".
+  tags multivalor (campos `ARTIST=`/`GENRE=` repetidos, o separados con `;` y `/`), `originaldate`, `albumsort` y la
+  marca de compilación, detectan "Varios artistas" y ordenan de forma natural ignorando acentos y "The". Los álbumes
+  con el mismo título y artista en carpetas distintas (reediciones, discos homónimos) quedan separados, y las
+  subcarpetas `CD1`/`Disc 2` se juntan en un solo álbum. Las compilaciones se ordenan por título (o `albumsort`).
 - **▶ Todas las pistas** en cada nivel que lista contenedores, en orden de navegación y sin duplicados.
-- **Número de canciones** en el título: `Korn (15)`.
+- **Conteos** en el título: canciones (`Korn (15)`), elementos (`Korn (4)` álbumes) o nada. El año después del título
+  del álbum también es opcional, igual que agrupar tus carpetas dentro de una entrada "Carpetas" en la raíz.
 - **Búsqueda UPnP** por título, artista, álbum y género.
 - **IDs estables**: los favoritos y presets de tu reproductor siguen funcionando tras reiniciar.
 
