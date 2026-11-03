@@ -116,8 +116,10 @@ Then open `http://<server-ip>:8200/`. Good to know:
   cross Docker's bridge network. This works on Linux; Docker Desktop on Windows/macOS doesn't support it well.
 - Settings, logs, tag cache and covers live in `./data` (mounted at `/data`), so rebuilding or updating the
   container keeps everything. Your music is mounted read-only at `/music`; the server never writes to it.
-- `SUPAVIC_NOMBRE`, `SUPAVIC_MUSICA` (default `/music`), `SUPAVIC_IDIOMA` and `SUPAVIC_PUERTO` set the initial
-  values on the first start; after that, use the control panel.
+- `SUPAVIC_NOMBRE`, `SUPAVIC_MUSICA` (default `/music`), `SUPAVIC_IDIOMA` and `SUPAVIC_PUERTO` are applied on the
+  first start and again whenever you change them in the compose file. Changes made in the control panel are kept
+  as long as the compose value stays the same.
+- Running several instances on the same network is fine: each one gets its own id (in `./data/datos/udn.txt`).
 - Keep `hostname` fixed (it's in the compose file): players identify the server by it.
 - Update: `docker compose pull && docker compose up -d`. To build it yourself instead, clone the repository and
   use `build: .` in the compose file (`docker compose up -d --build`). 32-bit Raspberry Pi OS isn't supported.
@@ -133,6 +135,9 @@ Two ways to browse, side by side:
 - **📁 Folders: instant.** Exactly what's on your disk, read the moment you open a folder. No scan, ever.
 - **🏷 Tag views: filled by the background reading.** Artists, albums, composers… built from your files' tags.
   They fill in while the server reads the library when it's idle (and as you open folders).
+- **You choose what goes into the tag views.** Each folder in **Folders** has an **Index tags** box. Untick it for
+  downloads, playlists or anything that would clutter Artists and Albums with loose or duplicate entries: you can
+  still browse it by folder with tags and covers, it just stays out of the tag views and search.
 
 ```
 SupaVic (Living room PC)
@@ -272,6 +277,7 @@ Everything is editable in the control panel (**Settings**). It's stored in `conf
 | `servidor.abrir_navegador` | `true` | Open the panel when you start the app yourself (never at Windows sign-in) |
 | `servidor.buscar_actualizaciones` | `true` | The panel tells you about new versions (your browser asks GitHub; the server never goes online) |
 | `musica.carpetas` | `[]` | Your music folders. With a single folder, its subfolders show at the root |
+| `musica.sin_indexar` | `[]` | Folders from `musica.carpetas` left out of the tag views and search (**Index tags** unticked); still browsable |
 | `musica.ignorar` | `*.part`, `.*`, … | Name patterns to hide (case-insensitive) |
 | `musica.ordenar_por_tags_hasta` | `150` | Folders with up to this many files are sorted by disc/track number |
 | `musica.agrupar_carpetas` | `false` | Show your folders inside a "Folders" entry at the root instead of directly at the root |
@@ -335,6 +341,15 @@ everything after a prefetch pass. Click **Status → Idle prefetch → Start now
 
 Those views use tags that many files don't have. **Browsing → Views at the root** shows how many tracks have each
 tag. Views only show what's been read so far, so a new library fills in as the background reading progresses.
+Also check **Folders**: a folder with **Index tags** unticked never shows up in the tag views.
+</details>
+
+<details>
+<summary><b>Artists and Albums are full of loose tracks from downloads or playlists</b></summary>
+
+In **Folders**, untick **Index tags** for those folders and click **Save**. Within a few seconds they drop out of
+Artists, Albums, Genres, your own views and search, but you can still browse them by folder. Tracks you play from
+them still count in Recently played and Most played.
 </details>
 
 <details>

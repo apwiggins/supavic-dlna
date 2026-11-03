@@ -2,6 +2,47 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-11-03
+
+### Added
+- **Index tags, per folder.** Each folder in **Folders** has an **Index tags** box (on by default, so nothing
+  changes when you update). Untick it for downloads, playlists or any folder that clutters Artists and Albums with
+  loose or duplicate entries: you can still browse it by folder, with tags and covers, but its tracks stay out of
+  Artists, Albums, Genres, Decades, Recently added, your own views and search. What you play from it still counts in
+  Recently played and Most played. Saved as `musica.sin_indexar` in `config.json`.
+
+### Changed
+- Folders with **Index tags** unticked aren't read in the background either (only when you open them), which saves
+  disk reading on large download folders. Their cached tags are kept, so ticking the box again brings them back
+  within seconds and only what's missing is read.
+- Changing your folders in the panel now refreshes the tag views right away.
+- **Track covers appear much faster when you open an album.** Each track used to need its own embedded picture
+  read from disk (often 1–2 MB per FLAC), even when all the tracks carry the same one, so on players that load
+  images while scrolling they showed up one by one. Now, once one track's picture is read, the other tracks
+  that carry the same picture (checked from their headers, a few KB each) get it right away: 10 covers went from
+  ~0.7 s to under 0.1 s on first open, and to ~0.01 s for albums the background reading has already prepared.
+  Tracks with different pictures (playlists, mixed folders) still get their own.
+- **No more generic icons while scrolling an album.** Once a cover is prepared, every track that carries it gets
+  the same image address (based on the picture's content), so the player downloads it once and the rows that
+  appear as you scroll show it straight from the player's own cache. In a playlist or mixed folder each track
+  still points to its own picture. Browsing speed is unchanged.
+
+### Fixed
+- A folder browsed while its files were still being copied or downloaded could keep a generic folder icon: the
+  player asked for the cover before the tracks had their pictures, and "no cover" was remembered. Folders that
+  changed in the last 10 minutes are now checked again on every request, straight from disk.
+- A folder whose first tracks have no embedded picture now uses the picture of any other track already read.
+- **Docker: two instances on the same network showed up as one server** (same name and cached content on the
+  WiiM), because the server id came from the container's hostname and `/data`, which are the same in every
+  container. Each Docker install now gets its own random id, saved in `/data/datos/udn.txt`. On Windows and Linux
+  without Docker the id doesn't change. Docker users will see the server once as a new device after updating,
+  so favorites saved on the player need to be added again. Reported by **apwiggins** (#3).
+- **Docker: `SUPAVIC_NOMBRE`, `SUPAVIC_MUSICA`, `SUPAVIC_IDIOMA` and `SUPAVIC_PUERTO` were only read on the
+  very first start**, so changing them in `docker-compose.yml` later did nothing. They're now applied whenever
+  their value changes. Changes made in the control panel are kept while the compose value stays the same.
+  (When updating from 1.4, folders you added in the panel are kept: `SUPAVIC_MUSICA` is only applied once you
+  change it.)
+
 ## [1.4.1] - 2026-10-30
 
 ### Added

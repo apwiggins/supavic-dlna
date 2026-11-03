@@ -59,7 +59,11 @@ Ahí van `config.json` y `datos/` (log, pid, eventos, historial y, si `cache.dir
 - "Agregados recientemente": `add` › fecha de creación (Windows, `st_birthtime`/`st_ctime` del scandir del índice) › mtime.
 - `Reproducciones` (`datos/reproducciones.db`, fuera de la caché): +1 cuando un reproductor pide el archivo desde el byte 0
   (la misma pista en < 60 s no cuenta doble).
-- UDN = uuid5(`servidorMusicaDLNA:<host>:<DIR_BASE>`) — prefijo histórico, no cambiarlo (los reproductores verían otro servidor).
+- UDN: `obtener_udn()` lo guarda en `datos/udn.txt`. Sin archivo: fuera de Docker = uuid5(`servidorMusicaDLNA:<host>:<DIR_BASE>`)
+  (prefijo histórico, no cambiarlo: los reproductores verían otro servidor); en Docker, uuid4 (hostname y /data se
+  repiten entre contenedores; se detecta por `/.dockerenv` o `/run/.containerenv`). Variables `SUPAVIC_*` (`ENV_CONFIG`):
+  se aplican cuando cambian (`datos/entorno.json`); al actualizar sin ese archivo, `SUPAVIC_MUSICA` solo se registra
+  (la imagen siempre trae `/music` y aplicarla borraría las carpetas del panel).
 - La carpeta navegada siempre se lee del disco (`listar(fresco=True)`): en Windows la fecha de una carpeta no cambia
   de forma fiable al mover subcarpetas. Conteos/portadas usan caché.
 - `CacheTags`: SQLite validado por `mtime_ns` + tamaño; si la ruta cambió, busca por identidad (nombre + tamaño + mtime).
@@ -78,6 +82,18 @@ Ahí van `config.json` y `datos/` (log, pid, eventos, historial y, si `cache.dir
   Nombres visibles traducidos (`VISTAS` se rellena en `aplicar_idioma`).
 - `Precargador`: en reposo (`precarga.inactividad_min` sin Browse/portadas ni transferencias) recorre todo; cualquier
   actividad la pausa.
+- "Indexar tags" por carpeta: `musica.sin_indexar` (subconjunto de `musica.carpetas`) → `Biblioteca.sin_indexar`
+  (claves de raíz). `Indice._construir` ignora sus filas (las cuenta en `d["fuera"]` para que el índice no parezca
+  atrasado); la precarga solo las lista (mantiene `vigentes`/`fuentes_vivas` para no podar su caché) sin leer tags
+  ni portadas. Navegar por carpetas, Search fuera; `v:tocadas`/`v:mas_tocadas` sí las incluyen (caen al disco).
+  Cambiar carpetas o `sin_indexar` invalida el índice; volver a marcar una fuerza una pasada de precarga.
+- Portadas por pista en álbumes: `App._portada_emb` extrae una y `_mapear_hermanas` asigna el mismo hash a las
+  pistas de la carpeta con la misma imagen (`firmas_imagen_flac`: tipo + largo + 3 KB de muestra, sin cargarla);
+  `_turno_carpeta` hace que las peticiones simultáneas del mismo álbum esperen a la primera. La precarga extrae
+  una embebida frontal por álbum para dejarlas listas.
+- URL por contenido `/art/h/<hash>.jpg` (inmutable, `max-age` 1 año): `url_portada_pista` la usa cuando la pista
+  tiene frontal y su hash ya está en `portadas` y en disco (`portada_existe`, memo `_h_en_disco`, se vacía al
+  borrar portadas). Si no, `/art/t/…` como antes.
 - `esc()` / DIDL: `upnp:albumArtURI` con `dlna:profileID="JPEG_SM"` si la portada ≤ 640 px.
 - Los POST de `/api/*` solo desde IPs privadas.
 

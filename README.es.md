@@ -116,8 +116,10 @@ Luego abre `http://<ip-del-servidor>:8200/`. Para tener en cuenta:
   cruza la red puente de Docker. Funciona en Linux; Docker Desktop en Windows/macOS no lo soporta bien.
 - Ajustes, logs, caché de tags y portadas viven en `./data` (montado en `/data`): reconstruir o actualizar el
   contenedor no borra nada. Tu música se monta de solo lectura en `/music`; el servidor nunca escribe ahí.
-- `SUPAVIC_NOMBRE`, `SUPAVIC_MUSICA` (por defecto `/music`), `SUPAVIC_IDIOMA` y `SUPAVIC_PUERTO` fijan los valores
-  iniciales en el primer arranque; después se cambian en el panel.
+- `SUPAVIC_NOMBRE`, `SUPAVIC_MUSICA` (por defecto `/music`), `SUPAVIC_IDIOMA` y `SUPAVIC_PUERTO` se aplican en el
+  primer arranque y cada vez que los cambias en el compose. Lo que cambies en el panel se respeta mientras el
+  valor del compose no cambie.
+- Puedes tener varias instancias en la misma red: cada una tiene su propio identificador (en `./data/datos/udn.txt`).
 - Deja fijo el `hostname` (viene en el compose): los reproductores identifican al servidor por él.
 - Actualizar: `docker compose pull && docker compose up -d`. Para construirla tú, clona el repositorio y usa
   `build: .` en el compose (`docker compose up -d --build`). Raspberry Pi OS de 32 bits no está soportado.
@@ -134,6 +136,9 @@ Dos formas de navegar, juntas:
   Nunca hace falta escanear.
 - **🏷 Vistas por etiquetas: se llenan con la lectura en segundo plano.** Artistas, álbumes, compositores… se arman
   con los tags de tus archivos mientras el servidor lee la biblioteca en reposo (y al abrir carpetas).
+- **Tú decides qué entra en las vistas por etiquetas.** Cada carpeta en **Carpetas** tiene la casilla **Indexar
+  tags**. Desmárcala en descargas, playlists o lo que llenaría Artistas y Álbumes de entradas sueltas o repetidas:
+  se sigue navegando por carpeta con tags y portadas, solo queda fuera de las vistas por etiquetas y la búsqueda.
 
 ```
 SupaVic (PC de la sala)
@@ -275,6 +280,7 @@ La tabla con todas las claves está en el [README en inglés](README.md#configur
 | `servidor.ip` | vacío | Vacío = anunciar en todas las interfaces. Pon una IP para usar solo esa |
 | `servidor.idioma` | `auto` | `auto`, `es` o `en` |
 | `musica.carpetas` | `[]` | Tus carpetas de música |
+| `musica.sin_indexar` | `[]` | Carpetas de `musica.carpetas` que quedan fuera de las vistas por etiquetas y la búsqueda (**Indexar tags** desmarcado); se siguen navegando |
 | `cache.directorio` | vacío | Carpeta de caché (vacío = `datos\` en la carpeta de datos) |
 | `precarga.inactividad_min` | `5` | Minutos sin navegación antes de precargar |
 | `vistas.activas` | ver panel | Vistas en la raíz, en orden (incluye `compositores`, `directores`, `sellos`, `calidad`, `tocadas`, `mas_tocadas` y tus vistas) |
@@ -326,7 +332,16 @@ para actualizarlas al momento.
 
 Esas vistas usan tags que muchos archivos no tienen. En **Navegación → Vistas en la raíz** se ve cuántas pistas
 tienen cada tag. Las vistas muestran lo que ya se leyó, así que una biblioteca nueva se va llenando conforme avanza
-la lectura en segundo plano.
+la lectura en segundo plano. Revisa también **Carpetas**: una carpeta con **Indexar tags** desmarcado nunca aparece
+en las vistas por etiquetas.
+</details>
+
+<details>
+<summary><b>Artistas y Álbumes se llenan de pistas sueltas de descargas o playlists</b></summary>
+
+En **Carpetas**, desmarca **Indexar tags** en esas carpetas y dale **Guardar**. En unos segundos salen de Artistas,
+Álbumes, Géneros, tus vistas y la búsqueda, pero se siguen navegando por carpeta. Lo que toques de ellas sigue
+contando en Reproducido recientemente y Más tocadas.
 </details>
 
 <details>

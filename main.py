@@ -49,7 +49,7 @@ try:
 except ImportError:          # funciona sin Pillow, pero manda las portadas sin redimensionar
     Image = None
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 APP = "SupaVic DLNA"
 
 
@@ -89,6 +89,7 @@ CONFIG_DEFECTO = {
     },
     "musica": {
         "carpetas": [],
+        "sin_indexar": [],             # carpetas (de "carpetas") que se navegan pero no entran en las vistas por tags
         "ignorar": ["*.part", "*.tmp", ".*", "$RECYCLE.BIN", "System Volume Information"],
         "ordenar_por_tags_hasta": 150,
         "agrupar_carpetas": False,     # True: las carpetas van dentro de una entrada "Carpetas" en la raíz
@@ -183,6 +184,37 @@ def _merge(defecto, actual):
     return out
 
 
+def obtener_udn():
+    """ID único del servidor (UDN), guardado en datos/udn.txt para que no cambie nunca.
+    Instalaciones existentes: el mismo que se calculaba antes (los reproductores no ven un servidor nuevo).
+    Docker nuevo/sin guardar: aleatorio. Antes salía del hostname + /data, iguales en todos los contenedores,
+    y dos instancias en la misma red se veían como un solo servidor."""
+    ruta = DIR_DATOS / "udn.txt"
+    try:
+        u = ruta.read_text(encoding="ascii").strip()
+        if re.fullmatch(r"[0-9a-f-]{36}", u):
+            return u
+    except OSError:
+        pass
+    en_docker = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")    # Docker / Podman
+    u = str(uuid.uuid4() if en_docker else
+            uuid.uuid5(uuid.NAMESPACE_DNS, f"servidorMusicaDLNA:{socket.gethostname()}:{DIR_BASE}"))
+    try:
+        DIR_DATOS.mkdir(parents=True, exist_ok=True)
+        ruta.write_text(u, encoding="ascii")
+    except OSError as e:
+        log.warning("Could not save the server id (%s): %s", ruta, e)
+    return u
+
+
+ENV_CONFIG = {   # variable -> (sección, clave, conversión); se aplican al arrancar cuando su valor cambia
+    "SUPAVIC_MUSICA": ("musica", "carpetas", lambda v: [c.strip() for c in re.split(r"[;,]", v) if c.strip()]),
+    "SUPAVIC_NOMBRE": ("servidor", "nombre", lambda v: v.strip()[:64]),
+    "SUPAVIC_IDIOMA": ("servidor", "idioma", lambda v: v.strip().lower()),
+    "SUPAVIC_PUERTO": ("servidor", "puerto", lambda v: int(v) if v.strip().isdigit() else None),
+}
+
+
 def cargar_config():
     actual = {}
     if RUTA_CONFIG.exists():
@@ -190,24 +222,44 @@ def cargar_config():
             actual = json.loads(RUTA_CONFIG.read_text(encoding="utf-8-sig"))
         except ValueError as e:
             log.error("Invalid config.json (%s); using defaults", e)
-    if not RUTA_CONFIG.exists():
-        # Primera vez (Docker, servicio): valores iniciales desde el entorno. Después se cambian en el panel.
-        env = os.environ
-        if env.get("SUPAVIC_MUSICA"):
-            actual.setdefault("musica", {})["carpetas"] = [c.strip() for c in re.split(r"[;,]", env["SUPAVIC_MUSICA"])
-                                                           if c.strip()]
-        if env.get("SUPAVIC_NOMBRE"):
-            actual.setdefault("servidor", {})["nombre"] = env["SUPAVIC_NOMBRE"].strip()[:64]
-        if env.get("SUPAVIC_IDIOMA"):
-            actual.setdefault("servidor", {})["idioma"] = env["SUPAVIC_IDIOMA"].strip().lower()
-        if env.get("SUPAVIC_PUERTO", "").isdigit():
-            actual.setdefault("servidor", {})["puerto"] = int(env["SUPAVIC_PUERTO"])
+    # Variables de entorno (Docker, servicio): se aplican la primera vez y cada vez que cambian en el compose;
+    # mientras no cambien, lo que se edite en el panel se respeta.
+    ruta_env = DIR_DATOS / "entorno.json"
+    try:
+        visto = json.loads(ruta_env.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        visto = {}
+    nuevo_visto, cambio_env = dict(visto), False
+    for var, (sec, clave, conv) in ENV_CONFIG.items():
+        v = os.environ.get(var)
+        if not v or not v.strip():
+            continue
+        if RUTA_CONFIG.exists() and visto.get(var) == v:
+            continue
+        if RUTA_CONFIG.exists() and var not in visto and var == "SUPAVIC_MUSICA":
+            # actualización desde una versión sin entorno.json: la imagen siempre trae SUPAVIC_MUSICA=/music, así
+            # que no es una elección del usuario; aplicarla borraría las carpetas que agregó en el panel
+            nuevo_visto[var], cambio_env = v, True
+            continue
+        val = conv(v)
+        if val in (None, "", []):
+            continue
+        actual.setdefault(sec, {})[clave] = val
+        nuevo_visto[var], cambio_env = v, True
+        if RUTA_CONFIG.exists():
+            log.info("%s changed: %s.%s = %r", var, sec, clave, val)
     cfg = _merge(CONFIG_DEFECTO, actual)
     aplicar_idioma(cfg)
     if not str(cfg["servidor"]["nombre"]).strip():
         cfg["servidor"]["nombre"] = T("nombre_defecto", host=socket.gethostname())[:64]
-    if cfg != actual:
+    if cfg != actual or cambio_env:                    # lo que vino del entorno queda escrito antes de marcarlo como visto
         guardar_config(cfg)
+    if cambio_env:
+        try:
+            DIR_DATOS.mkdir(parents=True, exist_ok=True)
+            ruta_env.write_text(json.dumps(nuevo_visto, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
     return cfg
 
 
@@ -261,6 +313,14 @@ def validar_config(nueva):
             avisos.append(T("e.no_existe", ruta=c))
         carpetas.append(c)
     m["carpetas"] = carpetas
+    sin_idx = []
+    for c in m.get("sin_indexar") if isinstance(m.get("sin_indexar"), list) else []:
+        c = os.path.normpath(str(c).strip().strip('"')) if str(c).strip() else ""
+        if ES_WINDOWS and re.fullmatch(r"[A-Za-z]:", c):
+            c += "\\"
+        if c in carpetas and c not in sin_idx:          # solo carpetas que siguen en la lista
+            sin_idx.append(c)
+    m["sin_indexar"] = sin_idx
     m["ignorar"] = [str(x).strip() for x in (m["ignorar"] if isinstance(m["ignorar"], list) else []) if str(x).strip()]
     try:
         m["ordenar_por_tags_hasta"] = max(0, int(m["ordenar_por_tags_hasta"]))
@@ -822,6 +882,44 @@ def leer_flac_rapido(ruta):
     return {k: v for k, v in meta.items() if v}
 
 
+def firmas_imagen_flac(ruta):
+    """{tipo: (largo, muestra)} de las imágenes embebidas de un FLAC sin cargarlas: el largo exacto en bytes más
+    dos trozos (2 KB del centro y 1 KB del final). Mismo tipo + largo + trozos = la misma imagen; dos imágenes
+    distintas del mismo largo (p. ej. fondos lisos) difieren en sus datos."""
+    out = {}
+    with open(ruta, "rb") as fh:
+        if fh.read(4) != b"fLaC":
+            return None
+        while True:
+            h = fh.read(4)
+            if len(h) < 4:
+                return None
+            ultimo, tipo, largo = h[0] & 0x80, h[0] & 0x7F, int.from_bytes(h[1:4], "big")
+            if tipo == 6 and largo >= 32:
+                ini = fh.tell()
+                d = fh.read(8)
+                t, lm = int.from_bytes(d[:4], "big"), int.from_bytes(d[4:8], "big")
+                fh.seek(lm, 1)
+                ld = int.from_bytes(fh.read(4), "big")
+                fh.seek(ld + 16, 1)
+                n = int.from_bytes(fh.read(4), "big")
+                if t not in out and n > 0:
+                    datos = fh.tell()
+                    fh.seek(datos + n // 2)
+                    centro = fh.read(min(2048, n))
+                    fh.seek(datos + max(0, n - 1024))
+                    out[t] = (n, centro + fh.read(1024))
+                fh.seek(ini + largo)
+            else:
+                fh.seek(largo, 1)
+            if ultimo:
+                return out
+
+
+def _elegida(firmas, prioridad=PRIO_IMG_ALBUM):
+    return next(((t, firmas[t]) for t in prioridad if t in firmas), None)
+
+
 def _poner_tipos(meta, tipos):
     """'art' = hay una imagen útil (no ícono); 'pt' = tipos, solo si no es únicamente la frontal."""
     utiles = sorted({int(t) for t in tipos} - {1, 2})
@@ -1100,10 +1198,14 @@ class Biblioteca:
 
     def configurar(self, cfg):
         self.raices = OrderedDict()
+        self.sin_indexar = set()                        # claves de raíz que no entran en las vistas por tags
+        fuera = set(cfg["musica"].get("sin_indexar") or ())
         for c in cfg["musica"]["carpetas"]:
             nombre = os.path.basename(c.rstrip("\\/")) or c.rstrip("\\/") or c
             key = clave_raiz(c, self.raices)
             self.raices[key] = (os.path.abspath(c), nombre)
+            if c in fuera:
+                self.sin_indexar.add(key)
         self.ignorar = [p.casefold() for p in cfg["musica"]["ignorar"]]
         self.limite_tags = cfg["musica"]["ordenar_por_tags_hasta"]
         with self.dir_lock:
@@ -1497,7 +1599,7 @@ class Biblioteca:
         return s + "</container>"
 
     def _item(self, d, parent, base, mm):
-        _, key, rel, _, tam = d
+        _, key, rel, mt, tam = d
         nombre = rel.rsplit("/", 1)[-1]
         ext = os.path.splitext(nombre)[1].lower()
         mime = AUDIO.get(ext, "application/octet-stream")
@@ -1507,7 +1609,7 @@ class Biblioteca:
         artista = mostrar_artistas(mm.get("artist") or mm.get("aartist") or "")
         album = mm.get("album") or carpeta
         qrel = quote(rel, safe="/")
-        art = self.url_portada_pista(base, key, rel, prel, qrel, mm)
+        art = self.url_portada_pista(base, key, rel, prel, qrel, mm, mt, tam)
         s = (f'<item id="t{key}:{esc(rel)}" parentID="{esc(parent)}" restricted="1">'
              f"<dc:title>{esc(titulo)}</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>")
         if artista:
@@ -1539,7 +1641,7 @@ class Biblioteca:
         return s + "</item>"
 
     # ---- portadas
-    def url_portada_pista(self, base, key, rel, prel, qrel, mm):
+    def url_portada_pista(self, base, key, rel, prel, qrel, mm, mt=None, tam=None):
         """URL de la portada de una pista, sin leer imágenes (decide con los tags en caché):
         - con portada embebida (y "una portada por pista" activo, o carpeta mixta): la suya (/art/t/…)
         - carpeta de un álbum: la del álbum (/art/a/…, una sola imagen para todas las pistas)
@@ -1548,6 +1650,12 @@ class Biblioteca:
         en_album = self.modo_album(carpeta)
         propia = bool(tipos_imagen(mm)) or bool((mm.get("x") or {}).get("discsubtitle"))
         if propia and (self.app.cfg["portadas"]["por_pista"] or not en_album):
+            if mt is not None and 3 in tipos_imagen(mm):
+                # imagen ya procesada: URL por CONTENIDO, la misma para todas las pistas que la comparten, así el
+                # reproductor la descarga una vez y las filas que aparecen al deslizar la toman de su caché
+                h = self.app._mapa(self.app.clave_fuente("emb", os.path.join(carpeta, rel.rsplit("/", 1)[-1]), mt, tam))
+                if h and self.app.portada_existe(h):
+                    return f"{base}/art/h/{h}.jpg"
             return f"{base}/art/t/{key}/{qrel}.jpg"
         if en_album:
             qp = quote(prel, safe="/")                          # portada de su carpeta, sin buscar en subcarpetas
@@ -1611,7 +1719,8 @@ class Biblioteca:
             c = self.art_src_cache.get(ck)
             if c and time.monotonic() - c[0] < self.TTL_PORTADA:
                 return c[1]
-        l = self.listar(ruta, ttl=None)
+        reciente = time.time() - mt / 1e9 < 600         # copiando/descargando: archivos que aún cambian
+        l = self.listar(ruta, ttl=None, fresco=reciente)
         src = None
         if l:
             dirs, pistas, imgs = l
@@ -1621,6 +1730,9 @@ class Biblioteca:
             if not src and pistas and embebidas:
                 metas = self.app.tags.obtener([(os.path.join(ruta, n), m, s) for n, m, s in pistas[:4]])
                 hit = next((r for r, mm in sorted(metas.items()) if mm.get("art")), None)
+                if not hit and len(pistas) > 4:            # las primeras sin imagen: cualquier otra ya leída que la tenga
+                    resto, _ = self.app.tags._en_cache([(os.path.join(ruta, n), m, s) for n, m, s in pistas[4:]])
+                    hit = next((r for r, mm in sorted(resto.items()) if mm.get("art")), None)
                 if hit:
                     src = ("emb", hit)
             if not src and orden:
@@ -1630,6 +1742,8 @@ class Biblioteca:
                     src = self.fuente_portada_carpeta(os.path.join(ruta, d), prof + 1, max_prof)
                     if src:
                         break
+        if src is None and reciente:
+            return None                    # carpeta recién cambiada (copiando/descargando): no recordar "sin portada"
         with self.dir_lock:
             self.art_src_cache[ck] = (time.monotonic(), src)
             while len(self.art_src_cache) > 8192:
@@ -1771,7 +1885,7 @@ class Indice:
         quieto = time.time() - self.app.ultima_peticion >= self.QUIETO_SEG
         # índice muy atrasado (instalación nueva, relectura): rehacerlo pronto; si no, como mucho una vez por minuto
         d = self.d
-        atrasado = d is not None and len(d["pistas"]) < 0.5 * self.app.tags.total()
+        atrasado = d is not None and len(d["pistas"]) < 0.5 * (self.app.tags.total() - d.get("fuera", 0))
         pausa = 5 if atrasado else 60
         with self.lock:
             lanzar = (not self.construyendo and time.monotonic() - getattr(self, "t_fallo", -1e9) > 60
@@ -1818,18 +1932,22 @@ class Indice:
             v = self.app.tags.version
             with self.app.tags.lock:                    # sin la columna meta: solo se lee la de lo que cambió
                 filas = self.app.tags.db.execute("SELECT ruta, mtime, tam FROM pistas").fetchall()
-            raices = []
+            raices, excluidas = [], []
             for key, (r, _) in self.app.bib.raices.items():
                 pref = os.path.normcase(r if r.endswith(os.sep) else r + os.sep)
-                raices.append((key, pref, len(pref)))
+                # "Indexar tags" desmarcado: se navega por carpetas, pero no entra en artistas/álbumes/búsqueda…
+                (excluidas if key in self.app.bib.sin_indexar else raices).append((key, pref, len(pref)))
             # Verificar que los archivos sigan ahí: UN listado por carpeta (no un stat por archivo), y si la
             # carpeta no cambió desde la construcción anterior (misma fecha y mismos archivos), ni eso: un stat.
             por_dir = defaultdict(list)
+            n_fuera = 0                                 # pistas en caché de carpetas sin indexar
             for j, fila in enumerate(filas):
                 self._ceder(j)
                 kr = self._raiz_de(fila[0], raices)
                 if kr:
                     por_dir[os.path.dirname(fila[0])].append((fila, kr))
+                elif excluidas and self._raiz_de(fila[0], excluidas):
+                    n_fuera += 1
             vigentes = []
             nacido = {}                                 # ruta -> fecha de creación (Windows: cuando llegó al disco)
             dirs_prev, dirs_nuevo = getattr(self, "_dirs", {}), {}
@@ -2048,6 +2166,7 @@ class Indice:
             for ip in interpretes.values():
                 ip["orden"] = sorted(ip["albumes"], key=por_anio)
             d = {
+                "fuera": n_fuera,
                 "pistas": pistas, "albumes": albumes, "artistas": artistas, "generos": generos, "interpretes": interpretes,
                 "orden_artistas": sorted(artistas, key=lambda k: _orden(artistas[k]["nombre"])),
                 "orden_interpretes": sorted(interpretes, key=lambda k: _orden(interpretes[k]["nombre"])),
@@ -3113,7 +3232,7 @@ class App:
         self.cfg = cargar_config()
         self.inicio = time.time()
         # (el prefijo histórico se conserva: cambiarlo haría que los reproductores vean un servidor nuevo)
-        self.udn = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"servidorMusicaDLNA:{socket.gethostname()}:{DIR_BASE}"))
+        self.udn = obtener_udn()
         self.update_id = int(time.time()) % 100000
         self.dir_cache = dir_cache(self.cfg)
         try:
@@ -3129,6 +3248,9 @@ class App:
         self.art_mem = OrderedDict()                      # hash -> (mime, bytes): las más pedidas, en memoria
         self.art_map = OrderedDict()                      # clave de fuente -> hash (espejo parcial de cache.db)
         self.art_lock = threading.Lock()
+        self._extrayendo = {}                             # carpeta -> Event: extrayendo una embebida de ese álbum
+        self._h_en_disco = set()                          # hashes de portada ya vistos en disco
+        self._hermanas_hechas = OrderedDict()             # (carpeta, fecha, hash) ya revisados en _mapear_hermanas
         self.subs = {}
         self.subs_lock = threading.Lock()
         self.clientes = {}
@@ -3248,6 +3370,15 @@ class App:
     def _archivo_portada(self, h):
         return self.dir_portadas / h[:2] / f"{h}.jpg"
 
+    def portada_existe(self, h):
+        """¿Está el JPEG de este hash en disco? Se comprueba una vez por hash (un álbum = un hash)."""
+        if h in self._h_en_disco:
+            return True
+        if self._archivo_portada(h).exists():
+            self._h_en_disco.add(h)
+            return True
+        return False
+
     def hash_portada(self, src):
         """Hash de la imagen ya conocido para una fuente (None = aún no se ha procesado; "" = no tiene)."""
         clave = self.clave_portada(src) if src else None
@@ -3274,6 +3405,82 @@ class App:
             archivo = self._archivo_portada(h)
             if archivo.exists():
                 return self._en_memoria(h, ("image/jpeg", archivo.read_bytes()), guardar_en_memoria)
+        if src[0] == "emb" and self.bib.modo_album(os.path.dirname(src[1])):
+            # álbum: una pista se extrae y las demás con la misma imagen quedan asignadas. Carpetas mixtas
+            # (playlists): cada pista por su cuenta, en paralelo y sin revisar a las demás
+            esperar = self._turno_carpeta(os.path.dirname(src[1]))
+            if esperar:                                   # otra pista de este álbum se está extrayendo
+                esperar.wait(3)
+                h = self._mapa(clave)
+                if h:
+                    archivo = self._archivo_portada(h)
+                    if archivo.exists():
+                        return self._en_memoria(h, ("image/jpeg", archivo.read_bytes()), guardar_en_memoria)
+            else:
+                try:
+                    return self._portada_emb(src, clave, guardar_en_memoria)
+                finally:
+                    self._fin_turno(os.path.dirname(src[1]))
+        return self._extraer_portada(src, clave, guardar_en_memoria)
+
+    def _turno_carpeta(self, carpeta):
+        """None = esta petición extrae (y mapea las hermanas); si no, el Event a esperar."""
+        with self.art_lock:
+            ev = self._extrayendo.get(carpeta)
+            if ev is None:
+                self._extrayendo[carpeta] = threading.Event()
+            return ev
+
+    def _fin_turno(self, carpeta):
+        with self.art_lock:
+            ev = self._extrayendo.pop(carpeta, None)
+        if ev:
+            ev.set()
+
+    def _portada_emb(self, src, clave, guardar_en_memoria):
+        """Extrae la embebida de una pista y asigna el mismo resultado a las pistas de la carpeta que traen la
+        misma imagen (mismo tipo y largo exacto, visto en sus encabezados): el resto del álbum sale al instante."""
+        res = self._extraer_portada(src, clave, guardar_en_memoria)
+        h = self._mapa(clave)
+        if res and h and src[1][-5:].lower() == ".flac":
+            try:
+                self._mapear_hermanas(src[1], h)
+            except Exception as e:
+                log.debug("Cover siblings %s: %s", src[1], e)
+        return res
+
+    def _mapear_hermanas(self, ruta, h):
+        carpeta = os.path.dirname(ruta)
+        try:
+            ck_dir = (carpeta, os.stat(carpeta).st_mtime_ns, h)
+        except OSError:
+            return
+        with self.art_lock:                               # una vez por álbum (mientras la carpeta no cambie)
+            if ck_dir in self._hermanas_hechas:
+                return
+            self._hermanas_hechas[ck_dir] = True
+            while len(self._hermanas_hechas) > 4096:
+                self._hermanas_hechas.popitem(last=False)
+        propia = _elegida(firmas_imagen_flac(ruta) or {})
+        if not propia:
+            return
+        l = self.bib.listar(carpeta, ttl=None)
+        n = 0
+        for nombre, mt, tam in (l[1] if l else ()):
+            r = os.path.join(carpeta, nombre)
+            if r == ruta or nombre[-5:].lower() != ".flac":
+                continue
+            ck = self.clave_fuente("emb", r, mt, tam)
+            if self._mapa(ck) is not None:
+                continue
+            if _elegida(firmas_imagen_flac(r) or {}) == propia:
+                self.tags.guardar_mapa_portada(ck, h)
+                self._recordar_mapa(ck, h)
+                n += 1
+        if n:
+            log.debug("Cover of %s reused for %d tracks", carpeta, n)
+
+    def _extraer_portada(self, src, clave, guardar_en_memoria):
         p = self.cfg["portadas"]
         try:
             data = extraer_imagen(src)
@@ -3309,6 +3516,7 @@ class App:
         return res
 
     def limpiar_cache(self):
+        self._h_en_disco.clear()
         n = 0
         if self.dir_portadas.exists():
             for f in self.dir_portadas.rglob("*.jpg"):
@@ -3351,8 +3559,11 @@ class App:
             return {"ok": False, "errores": errores, "avisos": avisos}
         reiniciar = cfg["servidor"] != self.cfg["servidor"] or cfg["cache"] != self.cfg["cache"]
         cambio_portadas = cfg["portadas"] != self.cfg["portadas"]
-        cambio_vistas = cfg["vistas"] != self.cfg["vistas"]
+        cambio_vistas = (cfg["vistas"] != self.cfg["vistas"]
+                         or [cfg["musica"][k] for k in ("carpetas", "sin_indexar")]
+                         != [self.cfg["musica"].get(k) for k in ("carpetas", "sin_indexar")])
         self.cfg_previo_portadas = dict(self.cfg["portadas"])
+        self.cfg_previo_musica = list(self.cfg["musica"].get("sin_indexar") or ())
         guardar_config(cfg)
         self.cfg = cfg
         self.cfg_gen = getattr(self, "cfg_gen", 0) + 1     # invalida las listas cacheadas
@@ -3367,11 +3578,14 @@ class App:
                                                                          cfg["portadas"]["recortar_cuadrado"]):
                 with self.tags.lock:                      # otro tamaño/recorte: los hashes cambian
                     self.tags.db.execute("DELETE FROM portadas")
+                self._h_en_disco.clear()
             with self.bib.dir_lock:
                 self.bib.art_src_cache.clear()
             self.indice._x_cache = OrderedDict()
         if cambio_vistas:
             self.indice.invalidar()
+        if set(self.cfg_previo_musica) - set(cfg["musica"]["sin_indexar"]):
+            self.forzar_precarga = True                   # carpeta vuelta a indexar: leer lo que falte
         self.contenido_cambio()
         log.info("Settings saved%s", " (restarting)" if reiniciar else "")
         self.eventos.emitir("config", reiniciar=reiniciar)
@@ -3642,22 +3856,25 @@ class Precargador(threading.Thread):
         log.info("Prefetch: server idle, filling cache…")
         app.eventos.emitir("precarga", accion="inicio")
         # 1) enumerar carpetas (DFS, mismo orden que en el WiiM)
-        carpetas, pila = [], [r for r, _ in reversed(list(bib.raices.values())) if os.path.isdir(r)]
+        # Carpetas con "Indexar tags" desmarcado se recorren igual (solo listados), para que la limpieza no borre
+        # lo que ya está en caché de ellas, pero no se leen tags ni portadas: eso pasa solo al abrirlas.
+        carpetas, pila = [], [(r, k not in bib.sin_indexar) for k, (r, _) in reversed(list(bib.raices.items()))
+                              if os.path.isdir(r)]
         while pila:
             if not app.inactivo():
                 return self._pausa()
-            ruta = pila.pop()
+            ruta, indexar = pila.pop()
             l = bib.listar(ruta)
             if not l:
                 continue
-            carpetas.append(ruta)
-            pila.extend(os.path.join(ruta, d) for d in reversed(l[0]))
+            carpetas.append((ruta, indexar))
+            pila.extend((os.path.join(ruta, d), indexar) for d in reversed(l[0]))
             self.st["total_carpetas"] = len(carpetas)
         hacer_portadas = app.cfg["precarga"]["portadas"]
         vigentes, claves = set(), set()
         fuentes_vivas = set()                            # claves de TODAS las fuentes que existen (para la limpieza)
         # 2) tags y portadas carpeta por carpeta
-        for i, ruta in enumerate(carpetas):
+        for i, (ruta, indexar) in enumerate(carpetas):
             self.st["carpetas"], self.st["actual"] = i, ruta
             if i and not i % 200:
                 app.indice.mantener()                     # en reposo: las vistas se van llenando durante la pasada
@@ -3668,6 +3885,13 @@ class Precargador(threading.Thread):
                 ck = app.clave_portada(("img", os.path.join(ruta, img)))
                 if ck:
                     fuentes_vivas.add(ck)
+            if not indexar:
+                for n, m, sz in l[1]:
+                    r = os.path.join(ruta, n)
+                    vigentes.add(r)
+                    fuentes_vivas.add(app.clave_fuente("emb", r, m, sz))
+                    fuentes_vivas.add(app.clave_fuente("emb_ar", r, m, sz))
+                continue
             if not l[1]:
                 if hacer_portadas:                       # carpeta de artista con su propia imagen
                     src = bib.fuente_portada_carpeta(ruta, max_prof=0)
@@ -3699,6 +3923,12 @@ class Precargador(threading.Thread):
             # siempre es la misma imagen: se reutiliza). Leer la imagen embebida de cada pista en reposo eran
             # decenas de GB de lectura en una biblioteca grande. Carpetas mezcladas: cada pista tiene la suya.
             por_pista = not bib.modo_album(ruta)
+            if not por_pista and pc["por_pista"]:
+                # álbum: UNA embebida frontal basta; las pistas con la misma imagen quedan asignadas a ella
+                # (_mapear_hermanas) y al abrir el álbum todas las portadas salen al instante
+                pri = next((r for r, mm in sorted(metas.items()) if 3 in tipos_imagen(mm)), None)
+                if pri:
+                    fuentes.append(("emb", pri))
             for r, mm in sorted(metas.items()):
                 tipos = tipos_imagen(mm)
                 if por_pista and tipos:
@@ -3731,6 +3961,7 @@ class Precargador(threading.Thread):
             claves |= {h for _, h in filas if h}
             with app.art_lock:
                 app.art_map.clear()
+            app._h_en_disco.clear()
             for f in app.dir_portadas.rglob("*.jpg"):
                 try:
                     if f.stem not in claves and f.stat().st_mtime < self.st["inicio"]:
@@ -3894,6 +4125,21 @@ class Handler(BaseHTTPRequestHandler):
     def enviar_portada(self, resto, head):
         app = self.app
         app.marcar_actividad()
+        mh = re.fullmatch(r"h/([0-9a-f]{24})\.jpg", resto)
+        if mh:                                              # por contenido: no cambia nunca, caché del reproductor
+            h = mh.group(1)
+            with app.art_lock:
+                res = app.art_mem.get(h)
+            if res is None:
+                archivo = app._archivo_portada(h)
+                try:
+                    res = app._en_memoria(h, ("image/jpeg", archivo.read_bytes()), True)
+                except OSError:
+                    return self._send(404, "", "text/plain", head=head)
+            return self._send(200, res[1], res[0], {
+                "Cache-Control": "public, max-age=31536000, immutable",
+                "contentFeatures.dlna.org": "DLNA.ORG_PN=JPEG_SM;DLNA.ORG_OP=00;DLNA.ORG_FLAGS=00f00000000000000000000000000000",
+                "transferMode.dlna.org": "Interactive"}, head=head)
         m = re.fullmatch(r"([dta])/([0-9a-f]{8})/(.*)", resto, re.S)
         src = None
         r = re.fullmatch(r"r/([0-9a-f]{10})/([0-9a-f]{10})\.jpg", resto)
@@ -4260,6 +4506,7 @@ input:focus,textarea:focus,select:focus{outline:2px solid var(--acc);outline-off
 .lista{list-style:none;padding:0;margin:0}
 .lista li{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
 .lista li code{flex:1}
+.chk.idx{margin:0;font-weight:500;white-space:nowrap}
 .msg{margin-top:14px;padding:10px 12px;border-radius:8px;font-size:14px;display:none}
 .msg.on{display:block}.msg.ok{background:color-mix(in srgb,var(--ok) 12%,transparent)}.msg.bad{background:color-mix(in srgb,var(--bad) 12%,transparent)}
 .bienv{display:none;margin-bottom:16px;border-color:var(--acc);background:var(--acc2)}
@@ -4333,6 +4580,7 @@ dialog.ancho{width:min(680px,calc(100vw - 32px))}
   <div class="card"><ul class="lista" id="c-lista"></ul>
     <div class="acts"><button class="btn" id="c-explorar" data-i="btn.agregar"></button><button class="btn pri" id="c-guardar" data-i="btn.guardar"></button></div>
     <div class="msg" id="c-msg"></div></div>
+  <p class="mut" style="font-size:13px" data-i="carp.idx.ayuda"></p>
 </section>
 
 <section id="t-nav">
@@ -4448,7 +4696,7 @@ const LANG="__LANG__";
 const TXT={
 es:{"tab.nav":"Navegación","n.intro":"Así se ve tu música en el WiiM (o en cualquier app DLNA). Hay dos formas de navegar y se pueden usar juntas.",
 "n.modos":"Dos formas de navegar","n.carp.t":"📁 Carpetas","n.ya":"al instante","n.carp.d":"Tal cual están en tu disco. No necesita escaneo: cada carpeta se lee en el momento en que la abres, siempre fiel a lo que hay.",
-"n.tags.t":"🏷 Vistas por etiquetas","n.tags.d":"Artistas, álbumes, compositores… se arman con los tags de tus archivos. Se llenan solas mientras el servidor lee la biblioteca en segundo plano (y al abrir carpetas).",
+"n.tags.t":"🏷 Vistas por etiquetas","n.tags.d":"Artistas, álbumes, compositores… se arman con los tags de tus archivos. Se llenan solas mientras el servidor lee la biblioteca en segundo plano (y al abrir carpetas). En <b>Carpetas</b> eliges cuáles entran (Indexar tags).",
 "n.prog":"{p}% leído","n.completa":"completas","n.lect":"Pistas con tags leídos: <b>{a}</b> · en las vistas: <b>{b}</b>. Lectura en segundo plano: {e}.",
 "n.vistas":"Vistas en la raíz","n.vistas.d":"Marca las que quieres ver en el reproductor y ordénalas con las flechas. Las vistas por tag (compositor, sello…) solo muestran algo si tus archivos tienen ese tag.",
 "n.nueva":"+ Nueva vista personalizada","btn.editar":"Editar","v.custom":"personalizada","subir":"Subir","bajar":"Bajar",
@@ -4480,6 +4728,8 @@ es:{"tab.nav":"Navegación","n.intro":"Así se ve tu música en el WiiM (o en cu
 "bienv.t":"Agrega tu carpeta de música para empezar","bienv.d":"Elige una o varias carpetas; aparecerán en tu reproductor (WiiM Home, BubbleUPnP…) con el nombre de este servidor.","bienv.btn":"Elegir carpetas",
 "k.pistas":"Pistas en caché","k.portadas":"Portadas","k.activo":"Activo","k.carpetas":"Carpetas","h.indice":"Biblioteca por etiquetas","h.precarga":"Precarga en reposo","h.disp":"Dispositivos",
 "th.ultima":"Última actividad","th.sonando":"Sonando / acción","h.red":"Red",
+"carp.idx":"Indexar tags","carp.idx.tip":"Desmarcado: la carpeta se sigue navegando, pero sus pistas no aparecen en Artistas, Álbumes, Géneros, búsqueda ni tus vistas",
+"carp.idx.ayuda":"<b>Indexar tags:</b> decide qué carpetas alimentan las vistas por etiquetas (Artistas, Álbumes, Géneros, Recientes, tus vistas y la búsqueda). Desmárcala en carpetas como descargas o playlists para que no llenen esas vistas de álbumes sueltos o repetidos: se siguen navegando igual por carpetas, con tags y portadas, y lo que toques de ellas sigue contando en Reproducido recientemente y Más tocadas. Además, no se leen en segundo plano. Guarda para aplicar: las vistas se actualizan en unos segundos.",
 "carp.intro":"Se muestran tal cual en tu reproductor. No hace falta indexar antes: los tags y portadas se leen al abrir cada carpeta, quedan en caché y el resto se precarga cuando el servidor está inactivo.",
 "btn.agregar":"Agregar carpeta…","btn.guardar":"Guardar","f.nombre":"Nombre en la red","f.idioma":"Idioma <span class=\"hint\">(reinicia el servidor)</span>","f.idioma.auto":"Automático (idioma del sistema)",
 "f.puerto":"Puerto HTTP <span class=\"hint\">(reinicia el servidor)</span>","f.ip":"IP fija <span class=\"hint\">vacío = todas las interfaces (recomendado)</span>","f.ip.ph":"ej. 192.168.1.50",
@@ -4500,7 +4750,7 @@ es:{"tab.nav":"Navegación","n.intro":"Así se ve tu música en el WiiM (o en cu
 "pie":"SupaVic DLNA {v} · Python {py} · datos en {d}","novedades":"Novedades"},
 en:{"tab.nav":"Browsing","n.intro":"This is how your music looks on the WiiM (or any DLNA app). There are two ways to browse, and you can use both.",
 "n.modos":"Two ways to browse","n.carp.t":"📁 Folders","n.ya":"instant","n.carp.d":"Exactly as they are on your disk. No scan needed: each folder is read the moment you open it, always true to what's there.",
-"n.tags.t":"🏷 Tag views","n.tags.d":"Artists, albums, composers… built from your files' tags. They fill in by themselves while the server reads the library in the background (and as you open folders).",
+"n.tags.t":"🏷 Tag views","n.tags.d":"Artists, albums, composers… built from your files' tags. They fill in by themselves while the server reads the library in the background (and as you open folders). Choose which folders take part under <b>Folders</b> (Index tags).",
 "n.prog":"{p}% read","n.completa":"complete","n.lect":"Tracks with tags read: <b>{a}</b> · in the views: <b>{b}</b>. Background reading: {e}.",
 "n.vistas":"Views at the root","n.vistas.d":"Tick the ones you want on your player and order them with the arrows. Tag views (composer, label…) only show something if your files have that tag.",
 "n.nueva":"+ New custom view","btn.editar":"Edit","v.custom":"custom","subir":"Move up","bajar":"Move down",
@@ -4532,6 +4782,8 @@ en:{"tab.nav":"Browsing","n.intro":"This is how your music looks on the WiiM (or
 "bienv.t":"Add your music folder to get started","bienv.d":"Pick one or more folders; they'll show up on your player (WiiM Home, BubbleUPnP…) under this server's name.","bienv.btn":"Choose folders",
 "k.pistas":"Tracks cached","k.portadas":"Covers","k.activo":"Uptime","k.carpetas":"Folders","h.indice":"Tag library","h.precarga":"Idle prefetch","h.disp":"Devices",
 "th.ultima":"Last activity","th.sonando":"Playing / action","h.red":"Network",
+"carp.idx":"Index tags","carp.idx.tip":"Unticked: you can still browse the folder, but its tracks don't show up in Artists, Albums, Genres, search or your views",
+"carp.idx.ayuda":"<b>Index tags:</b> choose which folders feed the tag views (Artists, Albums, Genres, Recently added, your own views and search). Untick it for folders like downloads or playlists so they don't fill those views with loose or duplicate albums: you can still browse them by folder, with tags and covers, and what you play from them still counts in Recently played and Most played. They also aren't read in the background. Save to apply: the views update within seconds.",
 "carp.intro":"They appear as-is on your player. No up-front indexing: tags and covers are read when each folder is opened, cached, and the rest is prefetched while the server is idle.",
 "btn.agregar":"Add folder…","btn.guardar":"Save","f.nombre":"Network name","f.idioma":"Language <span class=\"hint\">(restarts the server)</span>","f.idioma.auto":"Automatic (system language)",
 "f.puerto":"HTTP port <span class=\"hint\">(restarts the server)</span>","f.ip":"Fixed IP <span class=\"hint\">empty = all interfaces (recommended)</span>","f.ip.ph":"e.g. 192.168.1.50",
@@ -4556,7 +4808,7 @@ const nf=n=>Number(n||0).toLocaleString(LOC);
 document.querySelectorAll("[data-i]").forEach(e=>e.innerHTML=t(e.dataset.i));
 document.querySelectorAll("[data-ip]").forEach(e=>e.placeholder=t(e.dataset.ip));
 const $=s=>document.querySelector(s);
-let cfg=null, carpetas=[], dRuta="", vistasDisp=[], vistasX=[], catTags=null, orden=[], marcadas=new Set(), navListo=false, verAvisada=false;
+let cfg=null, carpetas=[], sinIdx=new Set(), dRuta="", vistasDisp=[], vistasX=[], catTags=null, orden=[], marcadas=new Set(), navListo=false, verAvisada=false;
 const PRESET_TAG={compositores:"composer",directores:"conductor",sellos:"label"};
 const PLANTS={raiz:["{nombre}","{nombre} ({n})"],
   cont:["{nombre} ({n})","{nombre}","{nombre} ({pistas})"],
@@ -4718,11 +4970,12 @@ async function estado(){
   }catch(e){$("#estado").textContent=t("sinconexion")}
 }
 function pintarCarpetas(){
-  $("#c-lista").innerHTML=carpetas.length?carpetas.map((c,i)=>`<li><code>${h(c)}</code><button class="btn sm" data-n="${i}">${t("quitar")}</button></li>`).join(""):`<li class="mut">${t("sinCarpetas")}</li>`;
-  $("#c-lista").querySelectorAll("button").forEach(b=>b.onclick=()=>{carpetas.splice(+b.dataset.n,1);pintarCarpetas()});
+  $("#c-lista").innerHTML=carpetas.length?carpetas.map((c,i)=>`<li><code>${h(c)}</code><label class="chk idx" title="${h(t("carp.idx.tip"))}"><input type="checkbox" data-i2="${i}"${sinIdx.has(c)?"":" checked"}> ${t("carp.idx")}</label><button class="btn sm" data-n="${i}">${t("quitar")}</button></li>`).join(""):`<li class="mut">${t("sinCarpetas")}</li>`;
+  $("#c-lista").querySelectorAll("button").forEach(b=>b.onclick=()=>{sinIdx.delete(carpetas[+b.dataset.n]);carpetas.splice(+b.dataset.n,1);pintarCarpetas()});
+  $("#c-lista").querySelectorAll("input[data-i2]").forEach(x=>x.onchange=()=>{const c=carpetas[+x.dataset.i2];x.checked?sinIdx.delete(c):sinIdx.add(c)});
 }
 async function cargarConfig(){
-  cfg=await api("/api/config");carpetas=[...cfg.musica.carpetas];pintarCarpetas();
+  cfg=await api("/api/config");carpetas=[...cfg.musica.carpetas];sinIdx=new Set(cfg.musica.sin_indexar||[]);pintarCarpetas();
   $("#f-nombre").value=cfg.servidor.nombre;$("#f-puerto").value=cfg.servidor.puerto;$("#f-ip").value=cfg.servidor.ip;$("#f-idioma").value=cfg.servidor.idioma||"auto";
   $("#f-cache").value=cfg.cache.directorio;cargarNav();
   $("#f-abrir").checked=cfg.servidor.abrir_navegador;$("#f-dash").checked=cfg.dashboard.con_servidor;$("#f-act").checked=cfg.servidor.buscar_actualizaciones!==false;
@@ -4737,7 +4990,7 @@ async function guardar(nuevo,id){
     setTimeout(()=>{location.href=`${location.protocol}//${location.hostname}:${p}/`},3500)}
   msg(id,tx,true);cargarConfig();estado();
 }
-$("#c-guardar").onclick=()=>{const n=structuredClone(cfg);n.musica.carpetas=carpetas;guardar(n,"#c-msg")};
+$("#c-guardar").onclick=()=>{const n=structuredClone(cfg);n.musica.carpetas=carpetas;n.musica.sin_indexar=carpetas.filter(c=>sinIdx.has(c));guardar(n,"#c-msg")};
 $("#f-guardar").onclick=()=>{const n=structuredClone(cfg);
   n.servidor.nombre=$("#f-nombre").value;n.servidor.puerto=+$("#f-puerto").value;n.servidor.ip=$("#f-ip").value.trim();n.servidor.idioma=$("#f-idioma").value;
   n.cache.directorio=$("#f-cache").value.trim();
